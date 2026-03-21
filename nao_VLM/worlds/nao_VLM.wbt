@@ -1,0 +1,61 @@
+#VRML_SIM R2025a utf8
+
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackground.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/backgrounds/protos/TexturedBackgroundLight.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/objects/floors/protos/Floor.proto"
+EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/projects/robots/softbank/nao/protos/Nao.proto"
+
+WorldInfo {
+  info [
+    "Aldebaran's Nao H25 V5.0"
+    "NAO is a programmable, 57-cm tall humanoid robot."
+    "The body has 25 degrees of freedom (DOF)."
+    "The sensors include 2 cameras, 4 microphones, sonar rangefinder, 2 IR emitters and receivers, 1 inertial board, and 8 pressure sensors."
+  ]
+  title "Aldebaran's Nao"
+  basicTimeStep 20
+  FPS 20
+  contactProperties [
+    ContactProperties {
+      material1 "NAO foot material"
+      coulombFriction [
+        7
+      ]
+      bounce 0.3
+      bounceVelocity 0.003
+    }
+  ]
+}
+Viewpoint {
+  orientation 0.11004914683657648 0.04798567379584391 -0.9927671229401689 2.3245067278144345
+  position 1.096078850513378 1.2204553552091344 0.6497795716524872
+  follow "NAO"
+}
+TexturedBackground {
+}
+TexturedBackgroundLight {
+}
+Floor {
+  rotation 0 0 1 1.57079632679
+  size 25 25
+  tileSize 0.8 0.8
+}
+Nao {
+  hidden rotation_22 0 1 0 0.9599999967587187
+  hidden rotation_23 0 1 0 0.9599999982588218
+  hidden rotation_24 0 1 0 0.9599999997544187
+  hidden rotation_25 0 1 0 0.9599999967825898
+  hidden rotation_26 0 1 0 0.9599999982748488
+  hidden rotation_27 0 1 0 0.9599999997466925
+  hidden rotation_29 0 -0.9999999999999999 0 0.9599999995700014
+  hidden rotation_34 0 1 0 0.959999996945537
+  hidden rotation_35 0 1 0 0.9599999983864003
+  hidden rotation_36 0 0.9999999999999999 0 0.9599999997786975
+  hidden rotation_37 0 1 0 0.959999997026759
+  hidden rotation_38 0 1 0 0.9599999984014882
+  hidden rotation_39 0 1 0 0.959999999790926
+  hidden rotation_41 0 -1 0 0.959999999598792
+  rotation 0 0 1 1.57079632679
+  controller "nao_vlm_test"
+  supervisor TRUE
+}
