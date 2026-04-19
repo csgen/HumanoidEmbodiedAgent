@@ -236,3 +236,6 @@ log/
 test_vision.jpg
 
 .DS_Store
+
+# Claude
+/.claude

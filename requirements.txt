@@ -1,3 +1,11 @@
+# Core simulation + kinematics
 opencv-python>=4.5.0
 numpy>=1.21.0
 pinocchio>=0.4.0
+
+# VLM client
+openai>=1.0.0
+python-dotenv>=1.0.0
+
+# Local camera server (only needed on the laptop streaming to cloud)
+flask>=2.3.0
