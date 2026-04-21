@@ -16,8 +16,9 @@ Flow per Webots step:
      through the sandbox (which internally calls blocking primitives that
      themselves call robot.step() - physics advances inside those loops)
 
-Phase 1 will replace the periodic trigger with a state-aware VLMTrigger
-(see plan §11.3) and polish primitive trajectories to cubic/quintic.
+Trajectory shapes available via the `trajectory=` parameter on primitives:
+  'linear', 'cubic' (smoothstep, default), 'cosine', 'min_jerk' (quintic).
+See `_ease()` for definitions.
 """
 from __future__ import annotations
 
@@ -55,7 +56,9 @@ from controller import Supervisor
 
 import config
 from frame_buffer import FrameBuffer
+from idle_animator import IdleAnimator
 from sandbox_exec import SandboxExecutor
+from vlm_trigger import VLMTrigger
 
 # VLMClient import is guarded; controller still runs without OpenAI SDK
 try:
@@ -141,11 +144,17 @@ class NaoVlmAPI:
         self._sync_sensors()
         return True
 
+    # Tiny margin keeps us off the exact boundary so Webots's strict `>` float
+    # comparison doesn't spam "too big requested position: X > X" warnings.
+    _LIMIT_MARGIN_RAD = 1e-4   # ~0.006 deg, negligible motion-wise
+
     def _clip_to_motor_limits(self, motor, angle: float) -> float:
         mn = motor.getMinPosition()
         mx = motor.getMaxPosition()
         if mn != mx:
-            return float(np.clip(angle, mn, mx))
+            return float(np.clip(angle,
+                                 mn + self._LIMIT_MARGIN_RAD,
+                                 mx - self._LIMIT_MARGIN_RAD))
         return float(angle)
 
     # ------------------------------------------------------------------ introspection
@@ -554,31 +563,54 @@ def main():
     })
     print(f'[init] sandbox exposes: {executor.registered_names}')
 
-    # 7. Main loop - Phase 0 uses a periodic trigger (Phase 2 will swap for VLMTrigger)
-    trigger_interval_s = 5.0
-    trigger_interval_steps = int(trigger_interval_s * 1000 / timestep)
-    last_trigger_step = -10_000_000
-    step_count = 0
+    # 7. State-aware trigger + idle animator
+    trigger: Optional[VLMTrigger] = None
+    if buffer is not None:
+        trigger = VLMTrigger(
+            buffer,
+            motion_threshold=config.MOTION_THRESHOLD,
+            post_action_delay=config.POST_ACTION_DELAY,
+            idle_safety_timeout=config.IDLE_SAFETY_TIMEOUT,
+        )
+        print(f'[init] VLMTrigger: motion>{config.MOTION_THRESHOLD}  '
+              f'post_action={config.POST_ACTION_DELAY}s  '
+              f'safety={config.IDLE_SAFETY_TIMEOUT}s')
 
-    print(f'[init] main loop entering. VLM trigger every {trigger_interval_s:.1f}s. '
+    idle_animator = IdleAnimator(motors, vlm_api._clip_to_motor_limits)
+    print(f'[init] IdleAnimator overlays: {idle_animator.stats()["joints"]}')
+
+    # 8. Main loop
+    step_count = 0
+    print(f'[init] main loop entering. State-aware trigger active. '
           f'Press Ctrl-C or stop Webots to exit.\n')
 
+    last_logged_state = None
     while robot.step(timestep) != -1:
         step_count += 1
         vlm_api._sync_sensors()
 
-        # Kick a new VLM call if none in flight and interval elapsed
-        if worker is not None and not worker.in_flight:
-            if step_count - last_trigger_step >= trigger_interval_steps:
-                if worker.kick():
-                    last_trigger_step = step_count
-                    buf_stats = buffer.stats() if buffer else {}
-                    print(f'[step {step_count}] VLM kick #{worker.total_calls}  '
-                          f'motion_score={buf_stats.get("last_motion_score", 0):.2f}  '
-                          f'buffer_len={buf_stats.get("buffer_len", 0)}')
+        # Idle overlay ticks every main-loop step; primitives take over the
+        # loop when they run, so idle naturally pauses during VLM execution.
+        idle_animator.tick(robot.getTime())
 
-        # Drain results
-        if worker is not None:
+        # State-aware trigger decides whether to kick the VLM
+        if trigger is not None and worker is not None:
+            if trigger.state != last_logged_state:
+                print(f'[step {step_count}] state -> {trigger.state}')
+                last_logged_state = trigger.state
+
+            if not worker.in_flight and trigger.should_trigger():
+                if worker.kick():
+                    trigger.mark_executing()
+                    buf_stats = buffer.stats() if buffer else {}
+                    tstats = trigger.stats()
+                    print(f'[step {step_count}] VLM kick #{worker.total_calls}  '
+                          f'motion={buf_stats.get("last_motion_score", 0):.2f}  '
+                          f'fires: motion={tstats["motion_fires"]} '
+                          f'post={tstats["postaction_fires"]} '
+                          f'safety={tstats["safety_fires"]}')
+
+            # Drain results
             rsp = worker.poll()
             if rsp is not None:
                 if rsp.ok:
@@ -591,8 +623,14 @@ def main():
                         print(f'[VLM] exec FAILED: {result.error}')
                         if result.traceback:
                             print(result.traceback)
+                    # Whether exec succeeded or failed, open the post-action
+                    # observation window so we see the human's reaction.
+                    trigger.mark_action_done()
                 else:
                     print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
+                    # Call failed before any motion happened - back to IDLE
+                    # so we can retry on next motion event.
+                    trigger.mark_idle()
 
     # Shutdown
     if buffer is not None:
