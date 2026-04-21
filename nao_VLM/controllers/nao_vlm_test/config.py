@@ -18,10 +18,24 @@ INPUT_MODE = os.getenv('INPUT_MODE', 'webcam')
 
 # Concrete source handed to cv2.VideoCapture (only used when INPUT_MODE=='webcam'):
 #   0                                         -> local webcam device (or OBS Virtual Cam)
-#   "videos/scenario_01_wave.mp4"             -> pre-recorded video file
+#   "videos/scenario_01_wave.mp4"             -> pre-recorded video file (relative to repo root)
+#   "/abs/path/to/video.mp4"                  -> pre-recorded video file (absolute)
 #   "http://localhost:5000/video_feed"        -> MJPEG stream via SSH reverse tunnel
 _source_env = os.getenv('WEBCAM_SOURCE', '0')
-WEBCAM_SOURCE = int(_source_env) if _source_env.isdigit() else _source_env
+if _source_env.isdigit():
+    WEBCAM_SOURCE = int(_source_env)
+else:
+    # Strings that are URLs or absolute paths are passed through untouched.
+    # Bare relative paths are resolved against the repo root, because the
+    # Webots controller launches with the controller directory as CWD and
+    # users typically drop their video files at <repo>/videos/.
+    _is_url = '://' in _source_env
+    _is_abs = Path(_source_env).is_absolute()
+    if _is_url or _is_abs:
+        WEBCAM_SOURCE = _source_env
+    else:
+        _resolved = (Path(__file__).resolve().parent.parent.parent.parent / _source_env)
+        WEBCAM_SOURCE = str(_resolved)
 
 # FrameBuffer parameters
 FRAME_BUFFER_SECONDS = 2.0       # rolling window length
