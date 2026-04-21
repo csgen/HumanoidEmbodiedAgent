@@ -54,10 +54,19 @@ or "greet()" function. You must COMPOSE motion from these primitives:
     move_joint(name: str, angle: float, duration: float,
                trajectory: str = 'cubic')
         # Smoothly move a single joint to `angle` radians over `duration` s.
+        # trajectory shapes (pick based on desired smoothness):
+        #   'cubic'    - smoothstep, default; good for most motions
+        #   'min_jerk' - quintic polynomial; use for slow/elegant/precise
+        #                motions (zero velocity AND acceleration at both ends,
+        #                minimizes integrated jerk)
+        #   'linear'   - constant velocity; avoid unless you explicitly want
+        #                a mechanical look
+        #   'cosine'   - similar to 'cubic', slightly different profile
 
     move_joints(joint_angles: dict, duration: float,
                 trajectory: str = 'cubic')
         # Move multiple joints in parallel, each to its target angle.
+        # Same trajectory options as move_joint.
 
     move_arm_ik(side: str, xyz: list, duration: float)
         # Cartesian IK: move the `side` hand ('left'|'right') to position
