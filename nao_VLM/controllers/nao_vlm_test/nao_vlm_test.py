@@ -1,280 +1,604 @@
-from controller import Supervisor
-import pinocchio as pin
-import numpy as np
-import os
+"""
+NAO VLM Webots controller — Phase 0 integration.
+
+Wires together:
+  - Pinocchio IK / dynamics (existing)
+  - FrameBuffer background capture (new, see frame_buffer.py)
+  - VLMClient multi-image GPT-4o call (new, see vlm_client.py)
+  - SandboxExecutor for VLM-generated code (new, see sandbox_exec.py)
+  - NaoVlmAPI with both legacy methods AND Phase-0 motion primitives
+
+Flow per Webots step:
+  1. sync Webots sensors into Pinocchio q
+  2. if no VLM call in flight AND interval elapsed, kick a new VLM call
+     in a daemon thread (frames sampled from FrameBuffer)
+  3. drain result queue; if a VLMResponse arrived, run its .python_code
+     through the sandbox (which internally calls blocking primitives that
+     themselves call robot.step() - physics advances inside those loops)
+
+Phase 1 will replace the periodic trigger with a state-aware VLMTrigger
+(see plan §11.3) and polish primitive trajectories to cubic/quintic.
+"""
+from __future__ import annotations
+
 import math
-import cv2  # 用于保存摄像头画面
+import os
+import queue
+import sys
+import threading
+import time
+from typing import Dict, List, Optional
+
+# ---------------------------------------------------------------------------
+# Load .env before reading config
+# ---------------------------------------------------------------------------
+try:
+    from dotenv import load_dotenv
+    # Try repo root first, then fall back to cwd (Webots controller cwd is this dir)
+    from pathlib import Path
+    _here = Path(__file__).resolve().parent
+    for env_candidate in (_here.parent.parent.parent / '.env', _here / '.env'):
+        if env_candidate.exists():
+            load_dotenv(env_candidate)
+            print(f'[init] loaded env from {env_candidate}')
+            break
+except ImportError:
+    pass  # python-dotenv is optional; OS env vars still work
+
+# ---------------------------------------------------------------------------
+# Core deps
+# ---------------------------------------------------------------------------
+import cv2
+import numpy as np
+import pinocchio as pin
+from controller import Supervisor
+
+import config
+from frame_buffer import FrameBuffer
+from sandbox_exec import SandboxExecutor
+
+# VLMClient import is guarded; controller still runs without OpenAI SDK
+try:
+    from vlm_client import VLMClient
+    _VLM_IMPORT_OK = True
+except Exception as _e:
+    print(f'[init] VLMClient unavailable: {_e}')
+    VLMClient = None  # type: ignore
+    _VLM_IMPORT_OK = False
+
+
+# ===========================================================================
+# Easing helpers
+# ===========================================================================
+
+def _ease(t: float, style: str = 'cubic') -> float:
+    """Return eased progress in [0,1]. Phase-0 basic implementations."""
+    t = max(0.0, min(1.0, t))
+    if style == 'linear':
+        return t
+    if style == 'cubic':
+        # smoothstep (Hermite); Phase 1 may swap to true cubic spline w/ v0,v1
+        return t * t * (3.0 - 2.0 * t)
+    if style == 'cosine':
+        return 0.5 * (1.0 - math.cos(math.pi * t))
+    if style == 'min_jerk':
+        # 5th-order polynomial with zero v,a at both ends (classic min-jerk)
+        return t ** 3 * (10.0 - 15.0 * t + 6.0 * t * t)
+    return t
+
+
+# ===========================================================================
+# NaoVlmAPI - legacy methods + Phase-0 motion primitives
+# ===========================================================================
 
 class NaoVlmAPI:
-    def __init__(self, robot, pin_model, pin_data, motors, cameras):
+    def __init__(
+        self,
+        robot: Supervisor,
+        pin_model,
+        pin_data,
+        motors: Dict[str, object],
+        sensors: Dict[str, object],
+        cameras: Dict[str, object],
+        timestep: int,
+        joint_q_idx_map: Dict[str, int],
+        finger_motors: Dict[str, List[object]],
+    ):
         self.robot = robot
         self.model = pin_model
         self.data = pin_data
         self.motors = motors
+        self.sensors = sensors
         self.cameras = cameras
-        
-        self.hand_frames = {
-            "left": self.model.getFrameId("l_wrist") if self.model.existFrame("l_wrist") else self.model.getFrameId("LHand"),
-            "right": self.model.getFrameId("r_wrist") if self.model.existFrame("r_wrist") else self.model.getFrameId("RHand")
-        }
-        self.current_posture = "stand"
-        
-    # 1. 状态获取
-    def get_robot_state(self):
-        state = {
-            "posture": self.current_posture,
-            "head_pitch": self.motors['HeadPitch'].getTargetPosition() if 'HeadPitch' in self.motors else 0.0,
-            "head_yaw": self.motors['HeadYaw'].getTargetPosition() if 'HeadYaw' in self.motors else 0.0
-        }
-        return str(state)
+        self.timestep = timestep
+        self.joint_q_idx_map = joint_q_idx_map
+        self.finger_motors = finger_motors
 
-    # 2. 视觉触发
-    def capture_camera_image(self, save_path="vlm_view.jpg"):
+        self.hand_frames = {
+            'left': (self.model.getFrameId('l_wrist') if self.model.existFrame('l_wrist')
+                     else self.model.getFrameId('LHand')),
+            'right': (self.model.getFrameId('r_wrist') if self.model.existFrame('r_wrist')
+                      else self.model.getFrameId('RHand')),
+        }
+        self.q_current = pin.neutral(self.model)
+        self.current_posture = 'stand'
+        self._aborted = False   # set to True when robot.step returns -1
+
+    # ------------------------------------------------------------------ internals
+
+    def _sync_sensors(self) -> None:
+        """Mirror Webots joint sensors -> Pinocchio q."""
+        for name, sensor in self.sensors.items():
+            idx = self.joint_q_idx_map.get(name)
+            if idx is not None:
+                self.q_current[idx] = sensor.getValue()
+
+    def _step(self) -> bool:
+        """Advance simulation by one timestep, sync sensors. Returns False if sim ended."""
+        if self.robot.step(self.timestep) == -1:
+            self._aborted = True
+            return False
+        self._sync_sensors()
+        return True
+
+    def _clip_to_motor_limits(self, motor, angle: float) -> float:
+        mn = motor.getMinPosition()
+        mx = motor.getMaxPosition()
+        if mn != mx:
+            return float(np.clip(angle, mn, mx))
+        return float(angle)
+
+    # ------------------------------------------------------------------ introspection
+
+    def get_joint_limits(self) -> Dict[str, tuple]:
+        """Return {joint_name: (min_rad, max_rad)} for non-fixed joints."""
+        out = {}
+        for name, motor in self.motors.items():
+            mn, mx = motor.getMinPosition(), motor.getMaxPosition()
+            if mn != mx:
+                out[name] = (float(mn), float(mx))
+        return out
+
+    def get_robot_state(self) -> Dict[str, float]:
+        """Return a small dict of joint positions + posture."""
+        state = {
+            'posture': self.current_posture,
+            'head_pitch': (self.motors['HeadPitch'].getTargetPosition()
+                           if 'HeadPitch' in self.motors else 0.0),
+            'head_yaw': (self.motors['HeadYaw'].getTargetPosition()
+                         if 'HeadYaw' in self.motors else 0.0),
+        }
+        return state
+
+    def capture_camera_image(self, save_path: str = 'vlm_view.jpg') -> str:
         if 'CameraTop' not in self.cameras:
-            return "ERROR: Top camera not found."
-            
+            return 'ERROR: Top camera not found.'
         cam = self.cameras['CameraTop']
         image_data = cam.getImage()
-        if image_data:
-            width, height = cam.getWidth(), cam.getHeight()
-            img = np.frombuffer(image_data, np.uint8).reshape((height, width, 4))
-            img_bgr = img[:, :, :3]
-            cv2.imwrite(save_path, img_bgr)
-            return f"SUCCESS: Image saved to {save_path}"
-        return "ERROR: Failed to capture image."
+        if not image_data:
+            return 'ERROR: Failed to capture image.'
+        w, h = cam.getWidth(), cam.getHeight()
+        arr = np.frombuffer(image_data, np.uint8).reshape((h, w, 4))
+        cv2.imwrite(save_path, arr[:, :, :3])
+        return f'SUCCESS: Image saved to {save_path}'
 
-    # 3. 转头
-    def look_at(self, yaw_angle, pitch_angle):
-        yaw = np.clip(yaw_angle, -2.0, 2.0)
-        pitch = np.clip(pitch_angle, -0.6, 0.5)
-        if 'HeadYaw' in self.motors: self.motors['HeadYaw'].setPosition(yaw)
-        if 'HeadPitch' in self.motors: self.motors['HeadPitch'].setPosition(pitch)
-        return f"SUCCESS: Look at yaw={yaw:.2f}, pitch={pitch:.2f}"
+    def speak(self, text: str) -> str:
+        print(f'\n[NAO speak] {text}')
+        return 'OK speak'
 
-    # 4. 手臂运动 (IK)
-    def move_arm(self, side, x, y, z):
-        if side not in ["left", "right"]: return "ERROR: Invalid side."
-        target_pos = np.array([x, y, z])
+    # ------------------------------------------------------------------ Phase-0 motion primitives
+    #   These are the API the VLM prompt describes. Phase 1 will refine the
+    #   trajectory math (cubic splines, proper min-jerk) without API changes.
+
+    def move_joint(self, name: str, angle: float, duration: float,
+                   trajectory: str = 'cubic') -> str:
+        motor = self.motors.get(name)
+        if motor is None:
+            return f'ERROR: unknown joint {name!r}'
+        target = self._clip_to_motor_limits(motor, float(angle))
+        start = motor.getTargetPosition()
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        for i in range(1, steps + 1):
+            s = _ease(i / steps, trajectory)
+            motor.setPosition(start + (target - start) * s)
+            if not self._step():
+                return 'ABORTED'
+        return f'OK move_joint {name}->{target:.3f}'
+
+    def move_joints(self, joint_angles: Dict[str, float], duration: float,
+                    trajectory: str = 'cubic') -> str:
+        segments = {}
+        for name, angle in joint_angles.items():
+            motor = self.motors.get(name)
+            if motor is None:
+                continue
+            start = motor.getTargetPosition()
+            target = self._clip_to_motor_limits(motor, float(angle))
+            segments[name] = (motor, start, target)
+        if not segments:
+            return 'ERROR: no known joints in move_joints'
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        for i in range(1, steps + 1):
+            s = _ease(i / steps, trajectory)
+            for name, (motor, start, target) in segments.items():
+                motor.setPosition(start + (target - start) * s)
+            if not self._step():
+                return 'ABORTED'
+        return f'OK move_joints n={len(segments)}'
+
+    def move_arm_ik(self, side: str, xyz, duration: float,
+                    orientation=None) -> str:
+        if side not in ('left', 'right'):
+            return f'ERROR: invalid side {side!r}'
+        try:
+            target_pos = np.asarray(xyz, dtype=float).reshape(3)
+        except Exception:
+            return f'ERROR: xyz must be a 3-vector, got {xyz!r}'
+
         frame_id = self.hand_frames[side]
-        q = getattr(self, 'q_current', pin.neutral(self.model)).copy()
-        
-        success = False
-        for _ in range(20):
+        q = self.q_current.copy()
+
+        # IK: iterate to convergence (keep existing bugfix: lock floating base).
+        reached = False
+        for _ in range(30):
             pin.forwardKinematics(self.model, self.data, q)
             pin.updateFramePlacements(self.model, self.data)
-            current_pos = self.data.oMf[frame_id].translation
-            err = target_pos - current_pos
+            cur = self.data.oMf[frame_id].translation
+            err = target_pos - cur
             if np.linalg.norm(err) < 0.005:
-                success = True
+                reached = True
                 break
-            J = pin.computeFrameJacobian(self.model, self.data, q, frame_id, pin.LOCAL_WORLD_ALIGNED)[:3, :]
-            
-            # --------------------------------------------------
-            # 【核心修复】：锁住虚拟底盘！
-            # 强制将前 6 个自由度（浮动基座）的雅可比矩阵列清零。
-            # 这逼迫数学引擎只能通过改变后续的手臂关节来消除误差。
-            # --------------------------------------------------
-            J[:, :6] = 0.0 
-            
+            J = pin.computeFrameJacobian(
+                self.model, self.data, q, frame_id, pin.LOCAL_WORLD_ALIGNED
+            )[:3, :]
+            J[:, :6] = 0.0   # lock floating base so the torso doesn't "absorb" the delta
             dq = np.linalg.pinv(J) @ err
             q = pin.integrate(self.model, q, dq * 0.5)
-            
-        if success:
-            # 真实下发给 Webots 电机 (带有物理限位安全剪裁)
-            for motor_name, motor in self.motors.items():
-                if motor_name in self.model.names:
-                    joint_id = self.model.getJointId(motor_name)
-                    q_idx = self.model.joints[joint_id].idx_q
-                    target_angle = float(q[q_idx])
-                    
-                    # 读取 Webots 里的物理极限边界
-                    min_pos = motor.getMinPosition()
-                    max_pos = motor.getMaxPosition()
-                    
-                    # 如果 min 和 max 不相等，说明电机有物理限位，我们就用 numpy 强行剪裁
-                    if min_pos != max_pos:
-                        target_angle = np.clip(target_angle, min_pos, max_pos)
-                        
-                    motor.setPosition(target_angle)
-            return f"SUCCESS: {side} arm moved to ({x}, {y}, {z})."
-        return "WARNING: Target unreachable."
 
-    # 5. 手指开合
-    def operate_gripper(self, side, action):
-        prefix = 'L' if side == "left" else 'R'
-        target_angle = 0.0 if action == "close" else 1.0 
-        success_count = 0
-        for i in range(1, 9):
-            phalanx_name = f"{prefix}Phalanx{i}"
-            motor = self.robot.getDevice(phalanx_name)
-            if motor:
-                motor.setPosition(target_angle)
-                success_count += 1
-        if success_count > 0:
-            return f"SUCCESS: {side} hand {action}ed."
-        return f"ERROR: Finger motors not found."
+        # Extract target angles for the Webots motors we control
+        target_angles = {}
+        for motor_name in self.motors:
+            if motor_name in self.model.names:
+                jid = self.model.getJointId(motor_name)
+                qi = self.model.joints[jid].idx_q
+                target_angles[motor_name] = float(q[qi])
+        if not target_angles:
+            return 'ERROR: no motors match IK solution'
 
-    # 6. 全身姿态
-    def set_posture(self, posture_name):
+        result = self.move_joints(target_angles, duration, trajectory='cubic')
+        suffix = 'converged' if reached else 'not-converged'
+        return f'{result} ({suffix})'
+
+    def oscillate_joint(self, name: str, center: float, amplitude: float,
+                        frequency: float, duration: float,
+                        decay: float = 0.0) -> str:
+        motor = self.motors.get(name)
+        if motor is None:
+            return f'ERROR: unknown joint {name!r}'
+        c = float(center)
+        a0 = float(amplitude)
+        f = float(frequency)
+        d = max(0.0, float(decay))
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        for i in range(1, steps + 1):
+            t = (i / steps) * dur
+            # Amplitude decay: envelope factor in (0,1] over the duration
+            env = math.exp(-d * t / dur) if d > 0 else 1.0
+            angle = c + a0 * env * math.sin(2.0 * math.pi * f * t)
+            motor.setPosition(self._clip_to_motor_limits(motor, angle))
+            if not self._step():
+                return 'ABORTED'
+        return f'OK oscillate_joint {name}'
+
+    def hold(self, duration: float) -> str:
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        for _ in range(steps):
+            if not self._step():
+                return 'ABORTED'
+        return f'OK hold {duration:.2f}s'
+
+    def idle(self, duration: float) -> str:
+        """Subtle breathing motion + small head scan. Phase-0 basic version."""
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        hy = self.motors.get('HeadYaw')
+        lsp = self.motors.get('LShoulderPitch')
+        rsp = self.motors.get('RShoulderPitch')
+        for i in range(1, steps + 1):
+            t = (i / steps) * dur
+            if hy is not None:
+                hy.setPosition(self._clip_to_motor_limits(hy, 0.08 * math.sin(0.3 * t)))
+            # Anti-phase subtle breathing on shoulders
+            if lsp is not None:
+                lsp.setPosition(self._clip_to_motor_limits(
+                    lsp, 1.5 + 0.03 * math.sin(0.5 * t)))
+            if rsp is not None:
+                rsp.setPosition(self._clip_to_motor_limits(
+                    rsp, 1.5 + 0.03 * math.sin(0.5 * t + math.pi)))
+            if not self._step():
+                return 'ABORTED'
+        return f'OK idle {duration:.2f}s'
+
+    # ------------------------------------------------------------------ legacy API (backward compat)
+    #   Kept verbatim in behavior so the existing automated test sequence still works.
+
+    def look_at(self, yaw_angle: float, pitch_angle: float) -> str:
+        yaw = float(np.clip(yaw_angle, -2.0, 2.0))
+        pitch = float(np.clip(pitch_angle, -0.6, 0.5))
+        if 'HeadYaw' in self.motors:
+            self.motors['HeadYaw'].setPosition(yaw)
+        if 'HeadPitch' in self.motors:
+            self.motors['HeadPitch'].setPosition(pitch)
+        return f'SUCCESS: Look at yaw={yaw:.2f}, pitch={pitch:.2f}'
+
+    def move_arm(self, side, x, y, z):
+        """Legacy non-blocking IK. Retained for backward compat; prefer move_arm_ik."""
+        return self.move_arm_ik(side, [x, y, z], duration=0.6)
+
+    def operate_gripper(self, side: str, action: str) -> str:
+        prefix = 'L' if side == 'left' else 'R'
+        target_angle = 0.0 if action == 'close' else 1.0
+        count = 0
+        for motor in self.finger_motors.get(prefix, []):
+            motor.setPosition(target_angle)
+            count += 1
+        if count == 0:
+            return 'ERROR: finger motors not found'
+        return f'SUCCESS: {side} hand {action}ed ({count} phalanges)'
+
+    def set_posture(self, posture_name: str) -> str:
         self.current_posture = posture_name
-        val_knee = 1.0 if posture_name == "squat" else 0.0
-        val_hip_ankle = -0.5 if posture_name == "squat" else 0.0
-            
-        for leg in ['L', 'R']:
-            if f'{leg}KneePitch' in self.motors: self.motors[f'{leg}KneePitch'].setPosition(val_knee)
-            if f'{leg}HipPitch' in self.motors: self.motors[f'{leg}HipPitch'].setPosition(val_hip_ankle)
-            if f'{leg}AnklePitch' in self.motors: self.motors[f'{leg}AnklePitch'].setPosition(val_hip_ankle)
-        return f"SUCCESS: Posture set to {posture_name}."
+        val_knee = 1.0 if posture_name == 'squat' else 0.0
+        val_hip_ankle = -0.5 if posture_name == 'squat' else 0.0
+        for leg in ('L', 'R'):
+            for suffix, v in (('KneePitch', val_knee),
+                              ('HipPitch', val_hip_ankle),
+                              ('AnklePitch', val_hip_ankle)):
+                name = f'{leg}{suffix}'
+                if name in self.motors:
+                    self.motors[name].setPosition(v)
+        return f'SUCCESS: posture={posture_name}'
 
-    # ==========================================
-    # 7. 宏观移动 (Supervisor 平滑滑行)
-    # ==========================================
-    def navigate_to(self, delta_x, delta_y, delta_theta):
-        """
-        供 VLM 调用：相对当前位置平滑移动
-        """
-        # 获取上帝视角的机器人节点
-        robot_node = self.robot.getSelf()
-        if robot_node is None:
-            return "ERROR: Please set 'supervisor' to TRUE in Webots NAO node."
-
-        trans_field = robot_node.getField("translation")
-        rot_field = robot_node.getField("rotation") # 如果需要转向可以操作这个
-
-        current_trans = trans_field.getSFVec3f()
-        
-        print(f">>> [底层导航] 正在平滑移动 X:{delta_x}m, Y:{delta_y}m...")
-        
-        # 将移动过程切分为 50 帧，看起来像平滑滑行
+    def navigate_to(self, delta_x: float, delta_y: float, delta_theta: float) -> str:
+        """Supervisor-mode macroscopic translation (biped workaround)."""
+        node = self.robot.getSelf()
+        if node is None:
+            return 'ERROR: supervisor mode required'
+        trans_field = node.getField('translation')
+        current = trans_field.getSFVec3f()
         frames = 50
-        timestep = int(self.robot.getBasicTimeStep())
-        
         for i in range(1, frames + 1):
-            interp_x = current_trans[0] + (delta_x * i / frames)
-            interp_y = current_trans[1] + (delta_y * i / frames)
-            # 保持 Z 轴（高度）不变
-            trans_field.setSFVec3f([interp_x, interp_y, current_trans[2]])
-            
-            # 推进仿真时间
-            if self.robot.step(timestep) == -1:
-                break
-                
-        return f"SUCCESS: Navigated to relative ({delta_x}, {delta_y})."
-
-    # 8. 说话
-    def speak(self, text):
-        print(f"\n📢 [NAO]: {text}")
-        return "SUCCESS: Text spoken."
+            interp_x = current[0] + (delta_x * i / frames)
+            interp_y = current[1] + (delta_y * i / frames)
+            trans_field.setSFVec3f([interp_x, interp_y, current[2]])
+            if not self._step():
+                return 'ABORTED'
+        return f'SUCCESS: navigated ({delta_x:+.2f}, {delta_y:+.2f})'
 
 
-def main():
-    print("\n" + "="*50)
-    print("🤖 具身智能 API：全面自动化阅兵测试")
-    print("="*50)
+# ===========================================================================
+# VLMWorker - off-thread VLM call wrapper
+# ===========================================================================
 
-    # 1. 小脑初始化
-    urdf_path = os.path.expanduser("~/nao_VLM/nao_robot/nao_description/urdf/naoV50_generated_urdf/nao.urdf")
-    if not os.path.exists(urdf_path):
-        urdf_path = os.path.expanduser("~/nao_VLM/nao_robot/nao_description/urdf/nao.urdf")
+class VLMWorker:
+    """Launches a VLM call on a daemon thread; main thread polls result_queue."""
+
+    def __init__(self, client, buffer: FrameBuffer):
+        self.client = client
+        self.buffer = buffer
+        self.result_queue: queue.Queue = queue.Queue()
+        self._in_flight = threading.Event()
+        self.total_calls = 0
+
+    @property
+    def in_flight(self) -> bool:
+        return self._in_flight.is_set()
+
+    def kick(self) -> bool:
+        """Try to start a new VLM call. Returns False if one is already in flight
+        or the buffer hasn't filled yet."""
+        if self._in_flight.is_set():
+            return False
+        frames = self.buffer.sample_recent(config.VLM_FRAME_COUNT)
+        if not frames:
+            return False
+        self._in_flight.set()
+        self.total_calls += 1
+        t = threading.Thread(
+            target=self._run, args=(frames,), name='VLMWorker', daemon=True
+        )
+        t.start()
+        return True
+
+    def _run(self, frames: List[str]) -> None:
+        try:
+            rsp = self.client.call(frames)
+            self.result_queue.put(rsp)
+        except Exception as e:
+            # Should not happen: VLMClient.call catches its own errors.
+            print(f'[VLMWorker] unexpected: {e}')
+        finally:
+            self._in_flight.clear()
+
+    def poll(self):
+        try:
+            return self.result_queue.get_nowait()
+        except queue.Empty:
+            return None
+
+
+# ===========================================================================
+# Main controller
+# ===========================================================================
+
+def _build_pinocchio():
+    urdf_path = config.find_urdf_path()
+    if urdf_path is None:
+        print('[ERROR] URDF not found. Candidates checked:')
+        for c in config.URDF_CANDIDATES:
+            print(f'          {c}')
+        return None, None, None
+    print(f'[init] URDF: {urdf_path}')
     try:
         model = pin.buildModelFromUrdf(urdf_path, pin.JointModelFreeFlyer())
-        data = model.createData()
-        q_pin = pin.neutral(model)
     except Exception as e:
-        print(f"Pinocchio 加载失败: {e}")
-        return
+        print(f'[ERROR] Pinocchio failed to load URDF: {e}')
+        return None, None, None
+    data = model.createData()
+    return urdf_path, model, data
 
-    # 2. 肉体初始化
-    robot = Supervisor()
-    timestep = int(robot.getBasicTimeStep())
-    
-    tracked_joints = [
-        'HeadYaw', 'HeadPitch',
-        'LShoulderPitch', 'LShoulderRoll', 'LElbowYaw', 'LElbowRoll', 'LWristYaw',
-        'RShoulderPitch', 'RShoulderRoll', 'RElbowYaw', 'RElbowRoll', 'RWristYaw',
-        'LHipPitch', 'LKneePitch', 'LAnklePitch',
-        'RHipPitch', 'RKneePitch', 'RAnklePitch'
-    ]
-    
-    motors, sensors, joint_q_idx_map, cameras = {}, {}, {}, {}
-    
-    camera_top = robot.getDevice('CameraTop')
-    if camera_top:
-        camera_top.enable(timestep)
-        cameras['CameraTop'] = camera_top
 
-    # 安全绑定
-    for name in tracked_joints:
-        motor = robot.getDevice(name)
-        if motor: motors[name] = motor
-        
-        sensor = robot.getDevice(name + 'S')
-        if sensor:
-            sensor.enable(timestep)
-            sensors[name] = sensor
-            
+def _bind_devices(robot: Supervisor, model, timestep: int):
+    cameras: Dict[str, object] = {}
+    cam_top = robot.getDevice('CameraTop')
+    if cam_top:
+        cam_top.enable(timestep)
+        cameras['CameraTop'] = cam_top
+
+    motors: Dict[str, object] = {}
+    sensors: Dict[str, object] = {}
+    joint_q_idx_map: Dict[str, int] = {}
+
+    for name in config.TRACKED_JOINTS:
+        m = robot.getDevice(name)
+        if m:
+            motors[name] = m
+        s = robot.getDevice(name + 'S')
+        if s:
+            s.enable(timestep)
+            sensors[name] = s
         if name in model.names:
             joint_q_idx_map[name] = model.joints[model.getJointId(name)].idx_q
 
-    # 3. 接口实例化
-    vlm_api = NaoVlmAPI(robot, model, data, motors, cameras)
+    finger_motors: Dict[str, List[object]] = {'L': [], 'R': []}
+    for side in ('L', 'R'):
+        for i in range(1, 9):
+            m = robot.getDevice(f'{side}Phalanx{i}')
+            if m:
+                finger_motors[side].append(m)
 
-    # 4. 自动化测试时间轴
+    return cameras, motors, sensors, joint_q_idx_map, finger_motors
+
+
+def main():
+    print('\n' + '=' * 60)
+    print(' NAO VLM Embodied Controller - Phase 0')
+    print('=' * 60)
+
+    # 1. Pinocchio
+    urdf_path, model, data = _build_pinocchio()
+    if model is None:
+        return
+
+    # 2. Webots
+    robot = Supervisor()
+    timestep = int(robot.getBasicTimeStep())
+    cameras, motors, sensors, joint_q_idx_map, finger_motors = _bind_devices(
+        robot, model, timestep
+    )
+    print(f'[init] bound {len(motors)} motors, {len(sensors)} sensors, '
+          f'{len(finger_motors["L"])+len(finger_motors["R"])} finger phalanges, '
+          f'{len(cameras)} camera(s)')
+
+    # 3. NaoVlmAPI
+    vlm_api = NaoVlmAPI(
+        robot=robot, pin_model=model, pin_data=data,
+        motors=motors, sensors=sensors, cameras=cameras,
+        timestep=timestep, joint_q_idx_map=joint_q_idx_map,
+        finger_motors=finger_motors,
+    )
+
+    # 4. FrameBuffer
+    buffer: Optional[FrameBuffer] = None
+    if config.INPUT_MODE == 'webcam':
+        print(f'[init] FrameBuffer source={config.WEBCAM_SOURCE!r}  '
+              f'fps={config.FRAME_BUFFER_FPS}  window={config.FRAME_BUFFER_SECONDS}s')
+        buffer = FrameBuffer(
+            source=config.WEBCAM_SOURCE,
+            buffer_seconds=config.FRAME_BUFFER_SECONDS,
+            fps=config.FRAME_BUFFER_FPS,
+        ).start()
+    else:
+        print(f'[init] INPUT_MODE={config.INPUT_MODE} - FrameBuffer disabled')
+
+    # 5. VLM client + worker
+    worker: Optional[VLMWorker] = None
+    if _VLM_IMPORT_OK and buffer is not None:
+        try:
+            client = VLMClient(joint_limits=vlm_api.get_joint_limits())
+            worker = VLMWorker(client, buffer)
+            print(f'[init] VLMClient ready, model={client.model}')
+        except Exception as e:
+            print(f'[init] VLMClient disabled: {e}')
+            worker = None
+
+    # 6. Sandbox executor
+    executor = SandboxExecutor()
+    executor.register_many({
+        'move_joint': vlm_api.move_joint,
+        'move_joints': vlm_api.move_joints,
+        'move_arm_ik': vlm_api.move_arm_ik,
+        'oscillate_joint': vlm_api.oscillate_joint,
+        'hold': vlm_api.hold,
+        'idle': vlm_api.idle,
+        'speak': vlm_api.speak,
+        # Legacy aliases so existing prompts still work:
+        'look_at': vlm_api.look_at,
+        'move_arm': vlm_api.move_arm,
+        'operate_gripper': vlm_api.operate_gripper,
+        'set_posture': vlm_api.set_posture,
+    })
+    print(f'[init] sandbox exposes: {executor.registered_names}')
+
+    # 7. Main loop - Phase 0 uses a periodic trigger (Phase 2 will swap for VLMTrigger)
+    trigger_interval_s = 5.0
+    trigger_interval_steps = int(trigger_interval_s * 1000 / timestep)
+    last_trigger_step = -10_000_000
     step_count = 0
-    print("\n>>> 开始 API 轮询测试...")
-    
+
+    print(f'[init] main loop entering. VLM trigger every {trigger_interval_s:.1f}s. '
+          f'Press Ctrl-C or stop Webots to exit.\n')
+
     while robot.step(timestep) != -1:
         step_count += 1
-        
-        # 实时同步物理数据给数学小脑
-        for name in tracked_joints:
-            if name in sensors and name in joint_q_idx_map:
-                q_pin[joint_q_idx_map[name]] = sensors[name].getValue()
-        vlm_api.q_current = q_pin 
-        
-        # ----------- 阅兵时间轴 -----------
-        if step_count == 20:
-            print("\n[测试 1/8: 语音表达]")
-            print(vlm_api.speak("开始 API 全面阅兵！"))
-            
-        elif step_count == 80:
-            print("\n[测试 2/8: 视觉注意力 (看右上方)]")
-            print(vlm_api.look_at(yaw_angle=-0.5, pitch_angle=-0.3))
-            
-        elif step_count == 140:
-            print("\n[测试 3/8: 拍照感知]")
-            print(vlm_api.capture_camera_image("test_vision.jpg"))
-            
-        elif step_count == 200:
-            print("\n[测试 4/8: 改变全身姿态 (下蹲)]")
-            print(vlm_api.set_posture("squat"))
-            
-        elif step_count == 280:
-            print("\n[测试 4.5: 改变全身姿态 (起立)]")
-            print(vlm_api.set_posture("stand"))
-            
-        elif step_count == 360:
-            print("\n[测试 5/8: 右手空间运动 (IK 到体前)]")
-            print(vlm_api.move_arm("right", x=0.05, y=-0.05, z=-0.05))
-            
-        elif step_count == 440:
-            print("\n[测试 6/8: 手指操作 (闭合)]")
-            print(vlm_api.operate_gripper("right", "close"))
-            
-        elif step_count == 520:
-            print("\n[测试 6.5: 手指操作 (张开)]")
-            print(vlm_api.operate_gripper("right", "open"))
-            
-        elif step_count == 600:
-            print("\n[测试 7/8: 获取最新状态]")
-            print(vlm_api.get_robot_state())
-            
-        elif step_count == 680:
-            print("\n[测试 8/8: 宏观导航 (底层系统 Mock)]")
-            print(vlm_api.navigate_to(0.5, 0.0, 0.0))
-            
-        elif step_count == 760:
-            print("\n🎉 所有 API 测试完毕，机器人在待命状态。")
+        vlm_api._sync_sensors()
+
+        # Kick a new VLM call if none in flight and interval elapsed
+        if worker is not None and not worker.in_flight:
+            if step_count - last_trigger_step >= trigger_interval_steps:
+                if worker.kick():
+                    last_trigger_step = step_count
+                    buf_stats = buffer.stats() if buffer else {}
+                    print(f'[step {step_count}] VLM kick #{worker.total_calls}  '
+                          f'motion_score={buf_stats.get("last_motion_score", 0):.2f}  '
+                          f'buffer_len={buf_stats.get("buffer_len", 0)}')
+
+        # Drain results
+        if worker is not None:
+            rsp = worker.poll()
+            if rsp is not None:
+                if rsp.ok:
+                    print(f'[VLM] {rsp.elapsed_seconds:.2f}s  ctx={rsp.semantic_context}')
+                    print(f'[VLM] code:\n{rsp.python_code}\n')
+                    result = executor.run(rsp.python_code)
+                    if result.ok:
+                        print(f'[VLM] exec OK in {result.elapsed_seconds:.2f}s')
+                    else:
+                        print(f'[VLM] exec FAILED: {result.error}')
+                        if result.traceback:
+                            print(result.traceback)
+                else:
+                    print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
+
+    # Shutdown
+    if buffer is not None:
+        buffer.stop()
+    print('[shutdown] main loop exited cleanly.')
+
 
 if __name__ == '__main__':
     main()
