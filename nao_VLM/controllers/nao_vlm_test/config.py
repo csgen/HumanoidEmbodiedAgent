@@ -42,6 +42,19 @@ FRAME_BUFFER_SECONDS = 2.0       # rolling window length
 FRAME_BUFFER_FPS = 10            # capture rate; also controls motion-score update rate
 VLM_FRAME_COUNT = 5              # number of frames sampled per VLM call
 VLM_WINDOW_SECONDS = 1.5         # conceptual span of the sampled sequence (for prompt text)
+FRAMEBUFFER_BACKEND = os.getenv('FRAMEBUFFER_BACKEND', 'auto').strip().lower()
+FRAMEBUFFER_WIDTH = int(os.getenv('FRAMEBUFFER_WIDTH', '1280'))
+FRAMEBUFFER_HEIGHT = int(os.getenv('FRAMEBUFFER_HEIGHT', '720'))
+
+# Controller run mode:
+#   'periodic' - original Phase-0 loop, kick VLM every fixed interval
+#   'oneshot'  - sample once from webcam/video, call VLM once, execute once, then exit
+RUN_MODE = os.getenv('RUN_MODE', 'periodic').strip().lower()
+ONE_SHOT_BUFFER_TIMEOUT = float(os.getenv('ONE_SHOT_BUFFER_TIMEOUT', '8.0'))
+ONE_SHOT_VLM_TIMEOUT = float(os.getenv('ONE_SHOT_VLM_TIMEOUT', '90.0'))
+ONE_SHOT_EXIT_AFTER_EXECUTE = os.getenv('ONE_SHOT_EXIT_AFTER_EXECUTE', '1').strip().lower() not in {
+    '0', 'false', 'no'
+}
 
 # ---------------------------------------------------------------------------
 # VLM trigger (state-aware)
@@ -55,10 +68,13 @@ IDLE_SAFETY_TIMEOUT = 30.0       # backstop trigger when IDLE for too long (robu
 # ---------------------------------------------------------------------------
 LLM_API_KEY = os.getenv('llm_api_key', '')
 LLM_BASE_URL = os.getenv('base_url', '')
+VLM_BACKEND = os.getenv('VLM_BACKEND', 'auto').strip().lower()
 VLM_MODEL = os.getenv('VLM_MODEL', 'gpt-4o')
 VLM_MAX_TOKENS = 500
 VLM_TEMPERATURE = 0.2
 VLM_IMAGE_DETAIL = 'low'         # 'low' ≈ 85 tokens/image, 'high' ≈ 1100+ tokens
+VLM_SCENARIO_HINT = os.getenv('VLM_SCENARIO_HINT', '').strip()
+LOCAL_VLM_MODEL = os.getenv('LOCAL_VLM_MODEL', 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct').strip()
 
 # ---------------------------------------------------------------------------
 # Robot control
@@ -114,3 +130,4 @@ def find_urdf_path():
 REPO_ROOT = _REPO_ROOT
 VIDEOS_DIR = _REPO_ROOT / 'videos'
 LOG_DIR = _REPO_ROOT / 'logs'
+ARTIFACTS_DIR = _REPO_ROOT / 'artifacts' / 'oneshot'

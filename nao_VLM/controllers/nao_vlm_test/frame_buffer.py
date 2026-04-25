@@ -19,12 +19,19 @@ from __future__ import annotations
 
 import base64
 import collections
+import platform
 import threading
 import time
 from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
+
+
+_DEFAULT_LINUX_RESOLUTIONS = [
+    (1280, 720),
+    (640, 480),
+]
 
 
 class FrameBuffer:
@@ -35,6 +42,9 @@ class FrameBuffer:
         fps: int = 10,
         jpeg_quality: int = 80,
         downscale_width: Optional[int] = None,
+        backend: str = 'auto',
+        frame_width: Optional[int] = None,
+        frame_height: Optional[int] = None,
     ) -> None:
         """
         Parameters
@@ -57,6 +67,9 @@ class FrameBuffer:
         self.fps = max(1, int(fps))
         self.jpeg_quality = int(jpeg_quality)
         self.downscale_width = downscale_width
+        self.backend = str(backend or 'auto').strip().lower()
+        self.frame_width = int(frame_width) if frame_width else None
+        self.frame_height = int(frame_height) if frame_height else None
 
         maxlen = max(2, int(buffer_seconds * self.fps))
         # Each entry: (timestamp_float, bgr_ndarray)
@@ -69,6 +82,55 @@ class FrameBuffer:
         self._thread = threading.Thread(
             target=self._capture_loop, name="FrameBuffer", daemon=True
         )
+
+    def _resolve_backends(self):
+        backends = {
+            'any': cv2.CAP_ANY,
+            'v4l2': getattr(cv2, 'CAP_V4L2', cv2.CAP_ANY),
+            'gstreamer': getattr(cv2, 'CAP_GSTREAMER', cv2.CAP_ANY),
+        }
+        if self.backend != 'auto':
+            return [(self.backend, backends.get(self.backend, cv2.CAP_ANY))]
+        if platform.system().lower() == 'linux' and isinstance(self.source, int):
+            return [
+                ('v4l2', backends['v4l2']),
+                ('any', backends['any']),
+                ('gstreamer', backends['gstreamer']),
+            ]
+        return [('any', backends['any'])]
+
+    def _resolution_candidates(self):
+        requested = []
+        if self.frame_width and self.frame_height:
+            requested.append((self.frame_width, self.frame_height))
+        if platform.system().lower() == 'linux' and isinstance(self.source, int):
+            for item in _DEFAULT_LINUX_RESOLUTIONS:
+                if item not in requested:
+                    requested.append(item)
+        return requested or [(0, 0)]
+
+    def _open_capture(self):
+        errors = []
+        for backend_name, backend_value in self._resolve_backends():
+            for width, height in self._resolution_candidates():
+                cap = cv2.VideoCapture(self.source, backend_value)
+                if not cap.isOpened():
+                    errors.append(f'backend={backend_name} open failed')
+                    cap.release()
+                    continue
+
+                if width > 0 and height > 0:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+                cap.set(cv2.CAP_PROP_FPS, self.fps)
+
+                for _ in range(5):
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        return cap, errors
+                errors.append(f'backend={backend_name} resolution={width}x{height} no frames')
+                cap.release()
+        return None, errors
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -90,9 +152,10 @@ class FrameBuffer:
     # ------------------------------------------------------------------ capture loop
 
     def _capture_loop(self) -> None:
-        cap = cv2.VideoCapture(self.source)
-        if not cap.isOpened():
-            print(f"[FrameBuffer] ERROR: failed to open source {self.source!r}")
+        cap, errors = self._open_capture()
+        if cap is None:
+            detail = '; '.join(errors) if errors else 'no more detail'
+            print(f"[FrameBuffer] ERROR: failed to open source {self.source!r} ({detail})")
             self._started.set()  # unblock start() even on failure
             return
 

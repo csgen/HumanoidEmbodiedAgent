@@ -21,12 +21,15 @@ Phase 1 will replace the periodic trigger with a state-aware VLMTrigger
 """
 from __future__ import annotations
 
+import base64
+import json
 import math
 import os
 import queue
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -35,7 +38,6 @@ from typing import Dict, List, Optional
 try:
     from dotenv import load_dotenv
     # Try repo root first, then fall back to cwd (Webots controller cwd is this dir)
-    from pathlib import Path
     _here = Path(__file__).resolve().parent
     for env_candidate in (_here.parent.parent.parent / '.env', _here / '.env'):
         if env_candidate.exists():
@@ -484,6 +486,147 @@ def _bind_devices(robot: Supervisor, model, timestep: int):
     return cameras, motors, sensors, joint_q_idx_map, finger_motors
 
 
+def _wait_for_frame_buffer(
+    robot: Supervisor,
+    vlm_api: NaoVlmAPI,
+    buffer: FrameBuffer,
+    timestep: int,
+    timeout_s: float,
+) -> bool:
+    deadline = time.time() + max(0.1, timeout_s)
+    while time.time() < deadline:
+        if robot.step(timestep) == -1:
+            return False
+        vlm_api._sync_sensors()
+        if len(buffer) >= config.VLM_FRAME_COUNT:
+            return True
+    return False
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding='utf-8')
+
+
+def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None) -> Path:
+    out_dir = config.ARTIFACTS_DIR / time.strftime('%Y%m%d_%H%M%S')
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, img_b64 in enumerate(frames_b64, start=1):
+        try:
+            (out_dir / f'frame_{index:02d}.jpg').write_bytes(base64.b64decode(img_b64))
+        except Exception as e:
+            _write_text(out_dir / f'frame_{index:02d}.error.txt', str(e))
+
+    semantic_json = json.dumps(rsp.semantic_context or {}, ensure_ascii=False, indent=2)
+    _write_text(out_dir / 'semantic_context.json', semantic_json)
+    _write_text(out_dir / 'python_code.py', rsp.python_code or '')
+    _write_text(out_dir / 'raw_response.txt', rsp.raw_text or '')
+
+    summary = [
+        f'ok={rsp.ok}',
+        f'elapsed_seconds={rsp.elapsed_seconds:.3f}',
+        f'error={rsp.error}',
+    ]
+    if exec_result is not None:
+        summary.extend([
+            f'exec_ok={exec_result.ok}',
+            f'exec_elapsed_seconds={exec_result.elapsed_seconds:.3f}',
+            f'exec_error={exec_result.error}',
+        ])
+        if exec_result.traceback:
+            _write_text(out_dir / 'execution_traceback.txt', exec_result.traceback)
+    _write_text(out_dir / 'summary.txt', '\n'.join(summary) + '\n')
+    return out_dir
+
+
+def _run_oneshot_demo(
+    robot: Supervisor,
+    timestep: int,
+    vlm_api: NaoVlmAPI,
+    buffer: Optional[FrameBuffer],
+    client,
+    executor: SandboxExecutor,
+) -> None:
+    if buffer is None:
+        print('[oneshot] ERROR: oneshot mode requires INPUT_MODE=webcam/video source.')
+        return
+    if client is None:
+        print('[oneshot] ERROR: VLM client unavailable; check SDK and llm_api_key.')
+        return
+
+    print(f'[oneshot] waiting for at least {config.VLM_FRAME_COUNT} frames...')
+    ready = _wait_for_frame_buffer(
+        robot=robot,
+        vlm_api=vlm_api,
+        buffer=buffer,
+        timestep=timestep,
+        timeout_s=config.ONE_SHOT_BUFFER_TIMEOUT,
+    )
+    if not ready:
+        print('[oneshot] ERROR: frame buffer did not fill before timeout or simulation ended.')
+        return
+
+    frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
+    if not frames:
+        print('[oneshot] ERROR: failed to sample frames from buffer.')
+        return
+
+    print(f'[oneshot] sampled {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
+    print('[oneshot] sending frames to VLM...')
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def _call_vlm() -> None:
+        try:
+            result_queue.put(client.call(frames))
+        except Exception as e:
+            result_queue.put(e)
+
+    threading.Thread(target=_call_vlm, name='OneShotVLM', daemon=True).start()
+
+    rsp = None
+    deadline = time.time() + max(1.0, config.ONE_SHOT_VLM_TIMEOUT)
+    while time.time() < deadline:
+        try:
+            rsp = result_queue.get_nowait()
+            break
+        except queue.Empty:
+            pass
+
+        if robot.step(timestep) == -1:
+            print('[oneshot] simulation ended while waiting for VLM.')
+            return
+        vlm_api._sync_sensors()
+
+    if rsp is None:
+        print(f'[oneshot] ERROR: VLM call timed out after {config.ONE_SHOT_VLM_TIMEOUT:.1f}s')
+        return
+    if isinstance(rsp, Exception):
+        print(f'[oneshot] ERROR: unexpected VLM exception: {rsp}')
+        return
+
+    if rsp.ok:
+        print(f'[oneshot] VLM done in {rsp.elapsed_seconds:.2f}s')
+        print(f'[oneshot] semantic context: {rsp.semantic_context}')
+        print(f'[oneshot] code:\n{rsp.python_code}\n')
+        exec_result = executor.run(rsp.python_code)
+        artifact_dir = _save_oneshot_artifacts(frames, rsp, exec_result)
+        if exec_result.ok:
+            print(f'[oneshot] execution OK in {exec_result.elapsed_seconds:.2f}s')
+        else:
+            print(f'[oneshot] execution FAILED: {exec_result.error}')
+            if exec_result.traceback:
+                print(exec_result.traceback)
+        print(f'[oneshot] artifacts saved to: {artifact_dir}')
+    else:
+        artifact_dir = _save_oneshot_artifacts(frames, rsp)
+        print(f'[oneshot] VLM FAILED: {rsp.error}')
+        print(f'[oneshot] artifacts saved to: {artifact_dir}')
+
+    if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
+        print('[oneshot] done; exiting controller.')
+
+
 def main():
     print('\n' + '=' * 60)
     print(' NAO VLM Embodied Controller - Phase 0')
@@ -521,20 +664,26 @@ def main():
             source=config.WEBCAM_SOURCE,
             buffer_seconds=config.FRAME_BUFFER_SECONDS,
             fps=config.FRAME_BUFFER_FPS,
+            backend=config.FRAMEBUFFER_BACKEND,
+            frame_width=config.FRAMEBUFFER_WIDTH,
+            frame_height=config.FRAMEBUFFER_HEIGHT,
         ).start()
     else:
         print(f'[init] INPUT_MODE={config.INPUT_MODE} - FrameBuffer disabled')
 
     # 5. VLM client + worker
+    client = None
     worker: Optional[VLMWorker] = None
     if _VLM_IMPORT_OK and buffer is not None:
         try:
             client = VLMClient(joint_limits=vlm_api.get_joint_limits())
-            worker = VLMWorker(client, buffer)
             print(f'[init] VLMClient ready, model={client.model}')
         except Exception as e:
             print(f'[init] VLMClient disabled: {e}')
+            client = None
             worker = None
+    if client is not None and buffer is not None and config.RUN_MODE != 'oneshot':
+        worker = VLMWorker(client, buffer)
 
     # 6. Sandbox executor
     executor = SandboxExecutor()
@@ -553,6 +702,22 @@ def main():
         'set_posture': vlm_api.set_posture,
     })
     print(f'[init] sandbox exposes: {executor.registered_names}')
+
+    if config.RUN_MODE == 'oneshot':
+        print('[init] run mode: oneshot')
+        try:
+            _run_oneshot_demo(
+                robot=robot,
+                timestep=timestep,
+                vlm_api=vlm_api,
+                buffer=buffer,
+                client=client,
+                executor=executor,
+            )
+        finally:
+            if buffer is not None:
+                buffer.stop()
+        return
 
     # 7. Main loop - Phase 0 uses a periodic trigger (Phase 2 will swap for VLMTrigger)
     trigger_interval_s = 5.0
