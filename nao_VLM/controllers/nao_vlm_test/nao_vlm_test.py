@@ -495,7 +495,7 @@ def _bind_devices(robot: Supervisor, model, timestep: int):
 
 def main():
     print('\n' + '=' * 60)
-    print(' NAO VLM Embodied Controller - Phase 0')
+    print(' NAO VLM Embodied Controller')
     print('=' * 60)
 
     # 1. Pinocchio
@@ -599,12 +599,14 @@ def main():
                 print(f'[step {step_count}] state -> {trigger.state}')
                 last_logged_state = trigger.state
 
-            if not worker.in_flight and trigger.should_trigger():
-                if worker.kick():
+            if not worker.in_flight:
+                reason = trigger.consider_trigger()
+                if reason is not None and worker.kick():
+                    trigger.confirm_fire(reason)
                     trigger.mark_executing()
                     buf_stats = buffer.stats() if buffer else {}
                     tstats = trigger.stats()
-                    print(f'[step {step_count}] VLM kick #{worker.total_calls}  '
+                    print(f'[step {step_count}] VLM kick #{worker.total_calls} ({reason})  '
                           f'motion={buf_stats.get("last_motion_score", 0):.2f}  '
                           f'fires: motion={tstats["motion_fires"]} '
                           f'post={tstats["postaction_fires"]} '
