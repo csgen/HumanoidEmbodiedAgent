@@ -725,3 +725,146 @@ This responds to both of the professor's critiques:
 - Safety Adherence (joint limits) == 100%
 - No CoM excursion outside support polygon during upper-body motion
 - Fallback activation < 20% per scenario
+
+---
+
+## 15. Next Iteration — Phase 3 Finishing + Phase 4
+
+### Context
+After Phase 2 was integrated and the trigger counter bug was fixed, a real run
+on a 20s phone-recorded clip surfaced two follow-up issues:
+
+1. **VLM parrots the single in-prompt example.** Kicks 4–8 produced near-identical
+   waving code (same xyz, same elbow oscillation), regardless of how the human
+   varied gestures. Root cause: the prompt only contains one example (the
+   "decaying wave"), so GPT-4o anchors to it and never explores other primitive
+   compositions. `min_jerk` is documented but never picked, for the same reason.
+2. **No real fallback chain.** When the VLM call fails (`parse_incomplete` /
+   refusal / network error), the controller just returns to IDLE and waits for
+   the next motion event. Two consecutive GPT-4o content-policy refusals were
+   already observed in an earlier run. Proposal §3.4 specifies a three-tier
+   degradation policy that we have not yet implemented.
+
+These are the two remaining items in plan Phase 3 (§12) and the entirety of
+plan Phase 4 (§12). Tackling them now closes the gap before Phase 5 evaluation.
+
+### Scope of this iteration
+
+#### A. Prompt diversification (Phase 3 §3.3 — finishing)
+Replace the single waving example with **3-4 diverse examples** spanning
+different intents and primitive combinations, so the VLM has a richer
+template library:
+
+- **Example 1: Decaying wave back at a greeting.** Keep current pattern but
+  use `trajectory='cubic'` explicitly and add an `affect`-based amplitude
+  guideline.
+- **Example 2: Cautious lean-back on hostile / approaching gesture.** Uses
+  `move_joints({'LHipPitch': ..., 'RHipPitch': ..., 'LKneePitch': ...,
+  'RKneePitch': ...}, duration=0.6, trajectory='min_jerk')` to bend slightly
+  backward (recovers proposal's "lean-back rejection" idea via biped joints).
+- **Example 3: Idle acknowledgment when human is static.** Uses
+  `move_joint('HeadYaw', ...)` for a small head tilt + `speak(...)` —
+  demonstrates that not every response must be an arm gesture.
+- **Example 4: Bowing greeting on slow approach.** Uses `move_joints` with
+  `trajectory='min_jerk'` to demonstrate when min_jerk is appropriate.
+
+Each example is annotated with a one-line comment about WHEN it would be
+chosen, training the VLM to differentiate by `motion_dynamics` and `affect`.
+
+#### B. Joint-name typo tolerance (Phase 3 §3.5)
+In the sandbox-exposed primitives (`move_joint`, `move_joints`,
+`oscillate_joint`), if `name` is not in `self.motors`, attempt
+`difflib.get_close_matches(name, self.motors.keys(), n=1, cutoff=0.7)`
+and either auto-correct (printing a warning) or reject with a clear error
+that fallback can catch. Recommended: **strict reject** (better signal for
+fallback policy) + log the candidate match for debugging.
+
+#### C. Three-tier fallback policy (Phase 4 §4.1)
+A new module `fallback.py` with a `FallbackPolicy` class:
+
+- **Tier A — Retry once on transient failure.** Triggered by:
+  network/timeout exception, `parse_incomplete`, sandbox AST-validation
+  failure (added in §15.D below). Re-kicks VLM with the SAME frames (so
+  ablations can compare inputs fairly). Retry budget per state-cycle = 1.
+- **Tier B — Replay last successful action.** When the VLM has produced
+  good code recently and the new attempt fails after retry, replay that
+  cached `python_code` instead of generating new. Cache size = last 3
+  successful responses; pick the most recent unless its semantic context
+  was very different from the current one (rough cosine similarity on the
+  semantic dict, or just "most recent" for MVP).
+- **Tier C — Idle.** If no successful response is cached, run
+  `vlm_api.idle(2.0)` and stay in IDLE.
+
+Wire-in: in the main loop, replace `trigger.mark_idle()` on `rsp.ok == False`
+with `fallback.handle_failure(reason, last_frames)` and
+`fallback.record_success(rsp)` on `rsp.ok == True`. The policy returns the
+new state to enter (`'retry'`, `'replay'`, `'idle'`).
+
+#### D. Sandbox joint-limit pre-check (Phase 4 §4.2)
+Currently `_clip_to_motor_limits` clips at primitive runtime. A pre-flight
+**static AST validation** in `SandboxExecutor` would let us reject ill-formed
+code BEFORE any joints move (cleaner fallback trigger):
+
+- Parse `code_str` with `ast.parse`. Walk all `Call` nodes whose function
+  name is one of the registered primitives.
+- For `move_joint`, `move_joints`, `oscillate_joint`: extract literal
+  `name` argument and check it is in the known joint list. Extract literal
+  `angle` / `center` / `amplitude` and verify within joint limits. (Skip
+  validation when arg is not a literal, e.g. inside a `for` loop
+  parameterized by `amp`.)
+- For `move_arm_ik`: extract literal `xyz` and check norm is reasonable
+  (< 0.6 m from torso origin) — VLM occasionally generates absurd targets.
+- Returns a `ValidationResult(ok, reasons)`. If invalid, sandbox refuses
+  to exec and triggers fallback Tier A.
+
+#### E. (Deferred — not in this iteration)
+- Pinocchio self-collision (§4.3): nice-to-have but adds significant
+  complexity. Defer unless we observe actual self-collisions in evaluation.
+
+### Critical files
+
+| File | Change |
+|---|---|
+| `nao_VLM/controllers/nao_vlm_test/vlm_client.py` | Replace single example with 3–4 diverse examples in `_BASE_SYSTEM_PROMPT`; add affect/distance modulation rules |
+| `nao_VLM/controllers/nao_vlm_test/nao_vlm_test.py` | Add `difflib` typo lookup in `move_joint`/`move_joints`/`oscillate_joint`; integrate `FallbackPolicy` in main loop |
+| `nao_VLM/controllers/nao_vlm_test/sandbox_exec.py` | Add `validate(code_str, joint_limits, motors)` AST-walk method returning `ValidationResult`; `run()` calls it before `exec` |
+| **NEW**: `nao_VLM/controllers/nao_vlm_test/fallback.py` | `FallbackPolicy` class: retry budget, action history (deque(maxlen=3)), state machine for handle_failure/record_success |
+
+### Reusable existing pieces
+
+- `SandboxExecutor.run()` — extend (don't replace) to call `.validate()` first.
+- `VLMResponse` dataclass — has `.python_code`, `.semantic_context` already; cache as-is in fallback action history.
+- `VLMTrigger.mark_idle()` — fallback Tier C just calls this.
+- `NaoVlmAPI.idle(duration)` — fallback Tier C uses this for the actual motion.
+- The frames passed to the failed `worker.kick(frames)` are already the same buffer sample; for Tier A retry, just re-call `client.call(frames)` (no need to resample the buffer — same evidence, fresh attempt).
+
+### Verification plan
+
+End-to-end smoke run with the existing 20s phone clip:
+
+1. **Diversity check**: across 8+ kicks, verify at least 3 distinct primitive
+   compositions appear in `[VLM] code:` blocks (not all variants of the
+   waving template). Check console for `trajectory='min_jerk'` appearing in
+   at least one VLM-generated call.
+2. **Typo tolerance**: temporarily inject `move_joint('rshoulderpitch', ...)`
+   (lowercase) into a manually-crafted VLM response and confirm sandbox
+   rejects it with a message naming `RShoulderPitch` as the close match.
+3. **Tier A retry**: artificially make `parse_vlm_output` return empty code
+   on every other call (toggle a debug flag), confirm the controller logs
+   `[fallback] tier A retry (attempt 1/1)` and re-kicks.
+4. **Tier B replay**: after at least one successful kick, force two
+   consecutive failures. Confirm log shows `[fallback] tier B replay of cached
+   action` and NAO re-runs the previously-cached primitive sequence.
+5. **Tier C idle**: with no cache populated, force a failure on the very
+   first kick. Confirm `[fallback] tier C idle` and NAO runs the breathing
+   primitive instead of staying frozen.
+6. **AST validation rejection**: craft a VLM response with
+   `move_joint('RShoulderPitch', 99.0, 0.5)` (out of range) and verify the
+   sandbox rejects pre-flight, fallback activates Tier A.
+7. **No regression**: existing kicks for a normal waving video should still
+   complete successfully with same observable behavior on NAO.
+
+### Out of scope (still left after this iteration)
+- Phase 5 evaluation harness (next iteration)
+- Phase 6 stretches (action preemption, local VLM, MediaPipe overlay)
+- Pinocchio self-collision check (deferred per §15.E)
