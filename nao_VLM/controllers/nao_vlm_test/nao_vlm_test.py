@@ -16,12 +16,14 @@ Flow per Webots step:
      through the sandbox (which internally calls blocking primitives that
      themselves call robot.step() - physics advances inside those loops)
 
-Phase 1 will replace the periodic trigger with a state-aware VLMTrigger
-(see plan §11.3) and polish primitive trajectories to cubic/quintic.
+Trajectory shapes available via the `trajectory=` parameter on primitives:
+  'linear', 'cubic' (smoothstep, default), 'cosine', 'min_jerk' (quintic).
+See `_ease()` for definitions.
 """
 from __future__ import annotations
 
 import base64
+import difflib
 import json
 import math
 import os
@@ -57,7 +59,9 @@ from controller import Supervisor
 
 import config
 from frame_buffer import FrameBuffer
+from idle_animator import IdleAnimator
 from sandbox_exec import SandboxExecutor
+from vlm_trigger import VLMTrigger
 
 # VLMClient import is guarded; controller still runs without OpenAI SDK
 try:
@@ -143,12 +147,45 @@ class NaoVlmAPI:
         self._sync_sensors()
         return True
 
+    # Tiny margin keeps us off the exact boundary so Webots's strict `>` float
+    # comparison doesn't spam "too big requested position: X > X" warnings.
+    _LIMIT_MARGIN_RAD = 1e-4   # ~0.006 deg, negligible motion-wise
+
     def _clip_to_motor_limits(self, motor, angle: float) -> float:
         mn = motor.getMinPosition()
         mx = motor.getMaxPosition()
         if mn != mx:
-            return float(np.clip(angle, mn, mx))
+            return float(np.clip(angle,
+                                 mn + self._LIMIT_MARGIN_RAD,
+                                 mx - self._LIMIT_MARGIN_RAD))
         return float(angle)
+
+    def _canonicalize_joint_name(self, name: str) -> Optional[str]:
+        if name in self.motors:
+            return name
+        if not isinstance(name, str):
+            return None
+
+        normalized = ''.join(ch for ch in name if ch.isalnum()).lower()
+        exact_normalized = {}
+        for joint_name in self.motors:
+            key = ''.join(ch for ch in joint_name if ch.isalnum()).lower()
+            exact_normalized[key] = joint_name
+
+        if normalized in exact_normalized:
+            return exact_normalized[normalized]
+
+        candidates = difflib.get_close_matches(
+            normalized,
+            list(exact_normalized.keys()),
+            n=1,
+            cutoff=0.72,
+        )
+        if not candidates:
+            return None
+        resolved = exact_normalized[candidates[0]]
+        print(f'[NaoVlmAPI] joint alias resolved: {name!r} -> {resolved!r}')
+        return resolved
 
     # ------------------------------------------------------------------ introspection
 
@@ -194,7 +231,8 @@ class NaoVlmAPI:
 
     def move_joint(self, name: str, angle: float, duration: float,
                    trajectory: str = 'cubic') -> str:
-        motor = self.motors.get(name)
+        resolved_name = self._canonicalize_joint_name(name)
+        motor = self.motors.get(resolved_name) if resolved_name else None
         if motor is None:
             return f'ERROR: unknown joint {name!r}'
         target = self._clip_to_motor_limits(motor, float(angle))
@@ -206,18 +244,19 @@ class NaoVlmAPI:
             motor.setPosition(start + (target - start) * s)
             if not self._step():
                 return 'ABORTED'
-        return f'OK move_joint {name}->{target:.3f}'
+        return f'OK move_joint {resolved_name}->{target:.3f}'
 
     def move_joints(self, joint_angles: Dict[str, float], duration: float,
                     trajectory: str = 'cubic') -> str:
         segments = {}
         for name, angle in joint_angles.items():
-            motor = self.motors.get(name)
+            resolved_name = self._canonicalize_joint_name(name)
+            motor = self.motors.get(resolved_name) if resolved_name else None
             if motor is None:
                 continue
             start = motor.getTargetPosition()
             target = self._clip_to_motor_limits(motor, float(angle))
-            segments[name] = (motor, start, target)
+            segments[resolved_name] = (motor, start, target)
         if not segments:
             return 'ERROR: no known joints in move_joints'
         dur = max(self.timestep / 1000.0, float(duration))
@@ -276,7 +315,8 @@ class NaoVlmAPI:
     def oscillate_joint(self, name: str, center: float, amplitude: float,
                         frequency: float, duration: float,
                         decay: float = 0.0) -> str:
-        motor = self.motors.get(name)
+        resolved_name = self._canonicalize_joint_name(name)
+        motor = self.motors.get(resolved_name) if resolved_name else None
         if motor is None:
             return f'ERROR: unknown joint {name!r}'
         c = float(center)
@@ -293,7 +333,7 @@ class NaoVlmAPI:
             motor.setPosition(self._clip_to_motor_limits(motor, angle))
             if not self._step():
                 return 'ABORTED'
-        return f'OK oscillate_joint {name}'
+        return f'OK oscillate_joint {resolved_name}'
 
     def hold(self, duration: float) -> str:
         dur = max(self.timestep / 1000.0, float(duration))
@@ -629,7 +669,7 @@ def _run_oneshot_demo(
 
 def main():
     print('\n' + '=' * 60)
-    print(' NAO VLM Embodied Controller - Phase 0')
+    print(' NAO VLM Embodied Controller')
     print('=' * 60)
 
     # 1. Pinocchio
@@ -719,31 +759,56 @@ def main():
                 buffer.stop()
         return
 
-    # 7. Main loop - Phase 0 uses a periodic trigger (Phase 2 will swap for VLMTrigger)
-    trigger_interval_s = 5.0
-    trigger_interval_steps = int(trigger_interval_s * 1000 / timestep)
-    last_trigger_step = -10_000_000
-    step_count = 0
+    # 7. State-aware trigger + idle animator
+    trigger: Optional[VLMTrigger] = None
+    if buffer is not None:
+        trigger = VLMTrigger(
+            buffer,
+            motion_threshold=config.MOTION_THRESHOLD,
+            post_action_delay=config.POST_ACTION_DELAY,
+            idle_safety_timeout=config.IDLE_SAFETY_TIMEOUT,
+        )
+        print(f'[init] VLMTrigger: motion>{config.MOTION_THRESHOLD}  '
+              f'post_action={config.POST_ACTION_DELAY}s  '
+              f'safety={config.IDLE_SAFETY_TIMEOUT}s')
 
-    print(f'[init] main loop entering. VLM trigger every {trigger_interval_s:.1f}s. '
+    idle_animator = IdleAnimator(motors, vlm_api._clip_to_motor_limits)
+    print(f'[init] IdleAnimator overlays: {idle_animator.stats()["joints"]}')
+
+    # 8. Main loop
+    step_count = 0
+    print(f'[init] main loop entering. State-aware trigger active. '
           f'Press Ctrl-C or stop Webots to exit.\n')
 
+    last_logged_state = None
     while robot.step(timestep) != -1:
         step_count += 1
         vlm_api._sync_sensors()
 
-        # Kick a new VLM call if none in flight and interval elapsed
-        if worker is not None and not worker.in_flight:
-            if step_count - last_trigger_step >= trigger_interval_steps:
-                if worker.kick():
-                    last_trigger_step = step_count
-                    buf_stats = buffer.stats() if buffer else {}
-                    print(f'[step {step_count}] VLM kick #{worker.total_calls}  '
-                          f'motion_score={buf_stats.get("last_motion_score", 0):.2f}  '
-                          f'buffer_len={buf_stats.get("buffer_len", 0)}')
+        # Idle overlay ticks every main-loop step; primitives take over the
+        # loop when they run, so idle naturally pauses during VLM execution.
+        idle_animator.tick(robot.getTime())
 
-        # Drain results
-        if worker is not None:
+        # State-aware trigger decides whether to kick the VLM
+        if trigger is not None and worker is not None:
+            if trigger.state != last_logged_state:
+                print(f'[step {step_count}] state -> {trigger.state}')
+                last_logged_state = trigger.state
+
+            if not worker.in_flight:
+                reason = trigger.consider_trigger()
+                if reason is not None and worker.kick():
+                    trigger.confirm_fire(reason)
+                    trigger.mark_executing()
+                    buf_stats = buffer.stats() if buffer else {}
+                    tstats = trigger.stats()
+                    print(f'[step {step_count}] VLM kick #{worker.total_calls} ({reason})  '
+                          f'motion={buf_stats.get("last_motion_score", 0):.2f}  '
+                          f'fires: motion={tstats["motion_fires"]} '
+                          f'post={tstats["postaction_fires"]} '
+                          f'safety={tstats["safety_fires"]}')
+
+            # Drain results
             rsp = worker.poll()
             if rsp is not None:
                 if rsp.ok:
@@ -756,8 +821,14 @@ def main():
                         print(f'[VLM] exec FAILED: {result.error}')
                         if result.traceback:
                             print(result.traceback)
+                    # Whether exec succeeded or failed, open the post-action
+                    # observation window so we see the human's reaction.
+                    trigger.mark_action_done()
                 else:
                     print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
+                    # Call failed before any motion happened - back to IDLE
+                    # so we can retry on next motion event.
+                    trigger.mark_idle()
 
     # Shutdown
     if buffer is not None:
