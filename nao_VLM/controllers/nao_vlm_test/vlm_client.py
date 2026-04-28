@@ -139,48 +139,60 @@ a clear and legible response that raises one arm and performs a brief wave.
 Keep the full motion sequence short, stable, and visually obvious in Webots.
 """
 
-_LOCAL_RESPONSE_PROMPT = """You are choosing how a friendly pet-like humanoid robot should respond to a person.
-Observe the chronological frames and choose exactly one response label.
+_LOCAL_RESPONSE_PROMPT = """You are observing a human from a robot-view camera.
+Observe the chronological frames and classify the HUMAN gesture itself.
 Return only one label from this list:
-PET_GREET_HAPPY
-PET_ORIENT_FOLLOW
-PET_APPROACH_CURIOUS
-PET_FREEZE_RESPECTFUL
-PET_SOFT_BACKOFF
-PET_EXCITED_ACK
-PET_CONFUSED_HEAD_TILT
-PET_WATCH_WAIT
+HUMAN_WAVE_HELLO
+HUMAN_POINT_DIRECTION
+HUMAN_BECKON_COME
+HUMAN_STOP_PALM
+HUMAN_REJECT_NO
+HUMAN_POSITIVE_ACK
+HUMAN_SHRUG_UNCERTAIN
+HUMAN_UNCLEAR
 
 Meanings:
-- PET_GREET_HAPPY: the human greets, waves, or raises a hand to engage.
-- PET_ORIENT_FOLLOW: the human points to a direction or object.
-- PET_APPROACH_CURIOUS: the human beckons the robot to come closer.
-- PET_FREEZE_RESPECTFUL: the human clearly shows a stop palm.
-- PET_SOFT_BACKOFF: the human rejects, says no, shakes head no, or wags a finger no-no.
-- PET_EXCITED_ACK: the human shows positive approval, claps, gives thumbs-up, or nods yes.
-- PET_CONFUSED_HEAD_TILT: the human shrugs or seems unsure.
-- PET_WATCH_WAIT: the signal is unclear.
+- HUMAN_WAVE_HELLO: a hello-wave or raised-hand greeting to engage the robot.
+- HUMAN_POINT_DIRECTION: pointing to a direction or object.
+- HUMAN_BECKON_COME: repeated come-here beckoning motion toward the body.
+- HUMAN_STOP_PALM: open palm shown to stop or pause the robot.
+- HUMAN_REJECT_NO: head shaking no, finger wagging no-no, or clear rejecting gesture.
+- HUMAN_POSITIVE_ACK: thumbs-up, clapping, or repeated yes nod.
+- HUMAN_SHRUG_UNCERTAIN: shrugging or clear uncertainty gesture.
+- HUMAN_UNCLEAR: no clear communicative gesture.
 
 Disambiguation rules:
-- Open palm facing the robot means PET_FREEZE_RESPECTFUL, not greeting.
-- Repeated hand wave toward self means PET_APPROACH_CURIOUS.
-- Extended arm or index finger indicating a direction/object means PET_ORIENT_FOLLOW.
-- Thumbs-up, clapping, or a clear yes nod means PET_EXCITED_ACK.
-- Head shaking no or finger wagging no-no means PET_SOFT_BACKOFF.
-- Shrugging with both shoulders/hands lifted means PET_CONFUSED_HEAD_TILT.
-- Greeting wave is a side-to-side hello wave to the robot, not a stop palm.
+- A static raised palm facing the robot is HUMAN_STOP_PALM, not HUMAN_WAVE_HELLO.
+- A moving side-to-side hello-wave is HUMAN_WAVE_HELLO.
+- Repeated hand motion drawing toward the torso is HUMAN_BECKON_COME.
+- Extended arm or index finger indicating a direction/object is HUMAN_POINT_DIRECTION.
+- Repeated up-down head motion with little hand motion is HUMAN_POSITIVE_ACK.
+- Repeated left-right head motion with little hand motion is HUMAN_REJECT_NO.
+- Finger wagging no-no is HUMAN_REJECT_NO, not HUMAN_STOP_PALM.
+- If both shoulders/forearms lift outward in an "I don't know" pattern, choose HUMAN_SHRUG_UNCERTAIN.
 
 Choose based on the full sequence, not a single frame. Output only one label."""
 
 _LOCAL_LABELS = {
-    'PET_GREET_HAPPY',
-    'PET_ORIENT_FOLLOW',
-    'PET_APPROACH_CURIOUS',
-    'PET_FREEZE_RESPECTFUL',
-    'PET_SOFT_BACKOFF',
-    'PET_EXCITED_ACK',
-    'PET_CONFUSED_HEAD_TILT',
-    'PET_WATCH_WAIT',
+    'HUMAN_WAVE_HELLO',
+    'HUMAN_POINT_DIRECTION',
+    'HUMAN_BECKON_COME',
+    'HUMAN_STOP_PALM',
+    'HUMAN_REJECT_NO',
+    'HUMAN_POSITIVE_ACK',
+    'HUMAN_SHRUG_UNCERTAIN',
+    'HUMAN_UNCLEAR',
+}
+
+_LOCAL_GESTURE_TO_RESPONSE = {
+    'HUMAN_WAVE_HELLO': 'PET_GREET_HAPPY',
+    'HUMAN_POINT_DIRECTION': 'PET_ORIENT_FOLLOW',
+    'HUMAN_BECKON_COME': 'PET_APPROACH_CURIOUS',
+    'HUMAN_STOP_PALM': 'PET_FREEZE_RESPECTFUL',
+    'HUMAN_REJECT_NO': 'PET_SOFT_BACKOFF',
+    'HUMAN_POSITIVE_ACK': 'PET_EXCITED_ACK',
+    'HUMAN_SHRUG_UNCERTAIN': 'PET_CONFUSED_HEAD_TILT',
+    'HUMAN_UNCLEAR': 'PET_WATCH_WAIT',
 }
 
 _LOCAL_MODEL_LOCK = Lock()
@@ -311,33 +323,35 @@ def _extract_label(raw: str) -> str:
     for label in _LOCAL_LABELS:
         if label in text:
             return label
-    return 'PET_WATCH_WAIT'
+    return 'HUMAN_UNCLEAR'
 
 
 def _compile_local_semantics(label: str) -> Dict[str, Any]:
+    response_label = _LOCAL_GESTURE_TO_RESPONSE.get(label, 'PET_WATCH_WAIT')
     semantic = {
         'intent': label,
         'social_distance': 'medium',
         'affect': 'neutral',
         'confidence': 0.7,
         'motion_dynamics': 'static',
-        'response_label': label,
+        'observed_gesture': label,
+        'response_label': response_label,
         'backend': 'local',
     }
 
-    if label == 'PET_GREET_HAPPY':
+    if label == 'HUMAN_WAVE_HELLO':
         semantic.update({'intent': 'human greeting or raised-hand engagement', 'affect': 'friendly', 'confidence': 0.9, 'motion_dynamics': 'raising'})
-    elif label == 'PET_ORIENT_FOLLOW':
+    elif label == 'HUMAN_POINT_DIRECTION':
         semantic.update({'intent': 'human pointing to a direction or object', 'affect': 'curious', 'confidence': 0.82, 'motion_dynamics': 'static'})
-    elif label == 'PET_APPROACH_CURIOUS':
+    elif label == 'HUMAN_BECKON_COME':
         semantic.update({'intent': 'human beckoning the robot closer', 'affect': 'curious', 'confidence': 0.8, 'motion_dynamics': 'approaching'})
-    elif label == 'PET_FREEZE_RESPECTFUL':
+    elif label == 'HUMAN_STOP_PALM':
         semantic.update({'intent': 'human stop signal', 'affect': 'submissive', 'confidence': 0.84, 'motion_dynamics': 'static'})
-    elif label == 'PET_SOFT_BACKOFF':
+    elif label == 'HUMAN_REJECT_NO':
         semantic.update({'intent': 'human rejection or no signal', 'affect': 'cautious', 'confidence': 0.8, 'motion_dynamics': 'retreating'})
-    elif label == 'PET_EXCITED_ACK':
+    elif label == 'HUMAN_POSITIVE_ACK':
         semantic.update({'intent': 'human approval or positive feedback', 'affect': 'happy', 'confidence': 0.86, 'motion_dynamics': 'oscillatory'})
-    elif label == 'PET_CONFUSED_HEAD_TILT':
+    elif label == 'HUMAN_SHRUG_UNCERTAIN':
         semantic.update({'intent': 'human uncertainty or shrug', 'affect': 'curious', 'confidence': 0.78, 'motion_dynamics': 'static'})
     return semantic
 
@@ -345,23 +359,22 @@ def _compile_local_semantics(label: str) -> Dict[str, Any]:
 def _compile_local_code(label: str) -> str:
     if label == 'PET_GREET_HAPPY':
         return """
-operate_gripper('right', 'open')
 move_joints({
-    'HeadYaw': 0.0,
-    'HeadPitch': -0.10,
-    'LShoulderPitch': 1.36,
-    'RShoulderPitch': 0.34,
-    'RShoulderRoll': -0.50,
-    'RElbowYaw': 1.18,
-    'RElbowRoll': 0.98,
-    'RWristYaw': 0.20,
-}, duration=0.85, trajectory='min_jerk')
-hold(0.10)
-for target in (-0.22, -0.72, -0.22, -0.66, -0.32):
-    move_joint('RShoulderRoll', target, duration=0.18, trajectory='min_jerk')
+    'HeadPitch': -0.06,
+    'LShoulderPitch': 1.44,
+    'RShoulderPitch': 0.70,
+    'RShoulderRoll': -0.22,
+    'RElbowYaw': 1.10,
+    'RElbowRoll': 0.72,
+    'RWristYaw': 0.08,
+}, duration=0.72, trajectory='min_jerk')
+hold(0.08)
+move_joint('RShoulderRoll', -0.12, duration=0.18, trajectory='min_jerk')
+move_joint('RShoulderRoll', -0.28, duration=0.20, trajectory='min_jerk')
+move_joint('RShoulderRoll', -0.14, duration=0.18, trajectory='min_jerk')
+move_joint('RShoulderRoll', -0.24, duration=0.20, trajectory='min_jerk')
 move_joint('RWristYaw', -0.12, duration=0.16, trajectory='min_jerk')
-move_joint('RWristYaw', 0.24, duration=0.16, trajectory='min_jerk')
-operate_gripper('right', 'close')
+move_joint('RWristYaw', 0.10, duration=0.16, trajectory='min_jerk')
 move_joints({
     'HeadPitch': 0.0,
     'LShoulderPitch': 1.50,
@@ -370,22 +383,21 @@ move_joints({
     'RElbowYaw': 1.20,
     'RElbowRoll': 0.50,
     'RWristYaw': 0.0,
-}, duration=0.82, trajectory='min_jerk')
+}, duration=0.70, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_ORIENT_FOLLOW':
         return """
-operate_gripper('right', 'open')
 move_joints({
-    'HeadYaw': 0.42,
-    'HeadPitch': -0.10,
-    'RShoulderPitch': 0.88,
-    'RShoulderRoll': -0.16,
+    'HeadYaw': 0.30,
+    'HeadPitch': -0.06,
+    'RShoulderPitch': 0.98,
+    'RShoulderRoll': -0.10,
     'RElbowYaw': 1.10,
-    'RElbowRoll': 0.30,
-    'RWristYaw': -0.20,
-}, duration=0.72, trajectory='min_jerk')
-hold(0.70)
+    'RElbowRoll': 0.42,
+    'RWristYaw': -0.12,
+}, duration=0.68, trajectory='min_jerk')
+hold(0.65)
 move_joints({
     'HeadYaw': 0.0,
     'HeadPitch': 0.0,
@@ -394,25 +406,21 @@ move_joints({
     'RElbowYaw': 1.20,
     'RElbowRoll': 0.50,
     'RWristYaw': 0.0,
-}, duration=0.84, trajectory='min_jerk')
-operate_gripper('right', 'close')
+}, duration=0.72, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_APPROACH_CURIOUS':
         return """
-operate_gripper('left', 'open')
-operate_gripper('right', 'open')
 move_joints({
-    'HeadPitch': -0.16,
-    'LShoulderPitch': 1.16,
-    'RShoulderPitch': 1.16,
-    'LElbowRoll': -0.68,
-    'RElbowRoll': 0.68,
-}, duration=0.52, trajectory='min_jerk')
-navigate_to(0.08, 0.0, 0.0)
-move_joint('HeadYaw', 0.12, duration=0.22, trajectory='min_jerk')
-move_joint('HeadYaw', -0.10, duration=0.22, trajectory='min_jerk')
-move_joint('HeadYaw', 0.0, duration=0.22, trajectory='min_jerk')
+    'HeadPitch': -0.14,
+    'LShoulderPitch': 1.26,
+    'RShoulderPitch': 1.26,
+    'LElbowRoll': -0.62,
+    'RElbowRoll': 0.62,
+}, duration=0.56, trajectory='min_jerk')
+move_joint('HeadYaw', 0.10, duration=0.22, trajectory='min_jerk')
+move_joint('HeadYaw', -0.08, duration=0.24, trajectory='min_jerk')
+move_joint('HeadYaw', 0.04, duration=0.20, trajectory='min_jerk')
 hold(0.30)
 move_joints({
     'HeadPitch': 0.0,
@@ -420,95 +428,69 @@ move_joints({
     'RShoulderPitch': 1.50,
     'LElbowRoll': -0.50,
     'RElbowRoll': 0.50,
-}, duration=0.70, trajectory='min_jerk')
-operate_gripper('left', 'close')
-operate_gripper('right', 'close')
+    'HeadYaw': 0.0,
+}, duration=0.66, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_FREEZE_RESPECTFUL':
         return """
 move_joints({
-    'HeadPitch': 0.16,
-    'LShoulderPitch': 1.62,
-    'RShoulderPitch': 1.62,
-    'LElbowRoll': -0.36,
-    'RElbowRoll': 0.36,
-    'LHipPitch': -0.10,
-    'RHipPitch': -0.10,
-    'LKneePitch': 0.22,
-    'RKneePitch': 0.22,
-    'LAnklePitch': -0.08,
-    'RAnklePitch': -0.08,
-}, duration=0.45, trajectory='min_jerk')
-hold(0.90)
+    'HeadPitch': 0.12,
+    'LShoulderPitch': 1.56,
+    'RShoulderPitch': 1.56,
+    'LElbowRoll': -0.42,
+    'RElbowRoll': 0.42,
+}, duration=0.38, trajectory='min_jerk')
+hold(1.00)
 move_joints({
     'HeadPitch': 0.0,
     'LShoulderPitch': 1.50,
     'RShoulderPitch': 1.50,
     'LElbowRoll': -0.50,
     'RElbowRoll': 0.50,
-    'LHipPitch': 0.0,
-    'RHipPitch': 0.0,
-    'LKneePitch': 0.0,
-    'RKneePitch': 0.0,
-    'LAnklePitch': 0.0,
-    'RAnklePitch': 0.0,
-}, duration=0.62, trajectory='min_jerk')
+}, duration=0.54, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_SOFT_BACKOFF':
         return """
 move_joints({
-    'HeadYaw': -0.15,
-    'HeadPitch': 0.12,
-    'LShoulderPitch': 1.58,
-    'RShoulderPitch': 1.58,
-    'LHipPitch': -0.06,
-    'RHipPitch': -0.06,
-    'LKneePitch': 0.14,
-    'RKneePitch': 0.14,
-}, duration=0.50, trajectory='min_jerk')
-navigate_to(-0.06, 0.0, 0.0)
+    'HeadYaw': -0.16,
+    'HeadPitch': 0.10,
+    'LShoulderPitch': 1.56,
+    'RShoulderPitch': 1.56,
+    'LElbowRoll': -0.44,
+    'RElbowRoll': 0.44,
+}, duration=0.42, trajectory='min_jerk')
 hold(0.30)
 move_joints({
     'HeadYaw': 0.0,
     'HeadPitch': 0.0,
     'LShoulderPitch': 1.50,
     'RShoulderPitch': 1.50,
-    'LHipPitch': 0.0,
-    'RHipPitch': 0.0,
-    'LKneePitch': 0.0,
-    'RKneePitch': 0.0,
-}, duration=0.55, trajectory='min_jerk')
+    'LElbowRoll': -0.50,
+    'RElbowRoll': 0.50,
+}, duration=0.56, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_EXCITED_ACK':
         return """
 move_joints({
-    'HeadPitch': -0.10,
-    'LShoulderPitch': 1.08,
-    'RShoulderPitch': 1.08,
-    'LShoulderRoll': 0.26,
-    'RShoulderRoll': -0.26,
-    'LHipPitch': -0.08,
-    'RHipPitch': -0.08,
-    'LKneePitch': 0.18,
-    'RKneePitch': 0.18,
+    'HeadPitch': -0.08,
+    'LShoulderPitch': 1.18,
+    'RShoulderPitch': 1.18,
+    'LShoulderRoll': 0.22,
+    'RShoulderRoll': -0.22,
 }, duration=0.42, trajectory='min_jerk')
-move_joint('HeadPitch', 0.04, duration=0.16, trajectory='min_jerk')
-move_joint('HeadPitch', -0.10, duration=0.16, trajectory='min_jerk')
-move_joint('HeadPitch', 0.04, duration=0.16, trajectory='min_jerk')
+move_joint('HeadPitch', 0.03, duration=0.18, trajectory='min_jerk')
+move_joint('HeadPitch', -0.08, duration=0.18, trajectory='min_jerk')
+move_joint('HeadPitch', 0.02, duration=0.18, trajectory='min_jerk')
 move_joints({
-    'LShoulderPitch': 0.92,
-    'RShoulderPitch': 0.92,
-    'LKneePitch': 0.28,
-    'RKneePitch': 0.28,
+    'LShoulderPitch': 1.06,
+    'RShoulderPitch': 1.06,
 }, duration=0.18, trajectory='min_jerk')
 move_joints({
-    'LShoulderPitch': 1.15,
-    'RShoulderPitch': 1.15,
-    'LKneePitch': 0.12,
-    'RKneePitch': 0.12,
+    'LShoulderPitch': 1.18,
+    'RShoulderPitch': 1.18,
 }, duration=0.18, trajectory='min_jerk')
 move_joints({
     'LShoulderPitch': 1.50,
@@ -516,31 +498,25 @@ move_joints({
     'HeadPitch': 0.0,
     'LShoulderRoll': 0.15,
     'RShoulderRoll': -0.15,
-    'LHipPitch': 0.0,
-    'RHipPitch': 0.0,
-    'LKneePitch': 0.0,
-    'RKneePitch': 0.0,
-}, duration=0.48, trajectory='min_jerk')
+}, duration=0.44, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_CONFUSED_HEAD_TILT':
         return """
-operate_gripper('left', 'open')
-operate_gripper('right', 'open')
 move_joints({
-    'HeadYaw': 0.22,
+    'HeadYaw': 0.20,
     'HeadPitch': -0.04,
-    'LShoulderPitch': 1.30,
-    'RShoulderPitch': 1.30,
-    'LShoulderRoll': 0.34,
-    'RShoulderRoll': -0.34,
-    'LElbowYaw': -0.82,
-    'RElbowYaw': 0.82,
-    'LElbowRoll': -0.92,
-    'RElbowRoll': 0.92,
+    'LShoulderPitch': 1.34,
+    'RShoulderPitch': 1.34,
+    'LShoulderRoll': 0.24,
+    'RShoulderRoll': -0.18,
+    'LElbowYaw': -1.00,
+    'RElbowYaw': 1.04,
+    'LElbowRoll': -0.74,
+    'RElbowRoll': 0.62,
 }, duration=0.45, trajectory='min_jerk')
 hold(0.35)
-move_joint('HeadYaw', -0.18, duration=0.36, trajectory='min_jerk')
+move_joint('HeadYaw', -0.10, duration=0.32, trajectory='min_jerk')
 hold(0.25)
 move_joints({
     'HeadYaw': 0.0,
@@ -553,9 +529,7 @@ move_joints({
     'RElbowYaw': 1.20,
     'LElbowRoll': -0.50,
     'RElbowRoll': 0.50,
-}, duration=0.52, trajectory='min_jerk')
-operate_gripper('left', 'close')
-operate_gripper('right', 'close')
+}, duration=0.50, trajectory='min_jerk')
 """.strip()
 
     return "idle(1.00)"
@@ -563,7 +537,7 @@ operate_gripper('right', 'close')
 
 def _compile_local_response(label: str) -> Tuple[Dict[str, Any], str]:
     semantic = _compile_local_semantics(label)
-    code = _compile_local_code(label)
+    code = _compile_local_code(semantic.get('response_label', 'PET_WATCH_WAIT'))
     return semantic, code
 
 
@@ -714,7 +688,8 @@ class VLMClient:
                     'backend': 'local',
                     'model': self.model,
                     'raw_label_text': raw_label_text,
-                    'response_label': label,
+                    'observed_gesture': label,
+                    'response_label': semantic.get('response_label'),
                 },
                 ensure_ascii=False,
                 indent=2,

@@ -49,6 +49,91 @@
    - `no_shake / shrug / yes_nod / finger_no / beckon` 仍有误判现象。
    - 因为标签错了，即使执行动作本身没问题，也会表现得“不对题”。
 
+## 本轮调试结论
+
+这次进一步确认，机器人行为看起来奇怪，根因不只一个：
+
+1. **之前的分类目标设计不合理**
+   - 旧版本让本地 VLM 直接输出“机器人应该采取的响应标签”。
+   - 这会把“看见了什么手势”和“机器人该怎么回应”混在同一步里。
+   - 一旦模型理解偏了，就会直接跳到错误的机器人动作上。
+
+2. **旧动作模板过于戏剧化**
+   - 旧版本里有手爪开合、明显下肢动作、前后平移、较大的肩部摆动。
+   - 这些动作虽然“显眼”，但不自然，像在做夸张演示而不是社交回应。
+
+## 本轮已完成的修复
+
+### 1) 把识别与决策拆开
+
+新的本地流程改成：
+
+`视频帧 -> 识别人类手势标签 -> 映射到机器人响应标签 -> 生成动作模板`
+
+当前人类手势标签包括：
+
+- `HUMAN_WAVE_HELLO`
+- `HUMAN_POINT_DIRECTION`
+- `HUMAN_BECKON_COME`
+- `HUMAN_STOP_PALM`
+- `HUMAN_REJECT_NO`
+- `HUMAN_POSITIVE_ACK`
+- `HUMAN_SHRUG_UNCERTAIN`
+- `HUMAN_UNCLEAR`
+
+这样做的好处是：
+
+- 更容易调试到底是“看错了”还是“回应动作不好看”。
+- 更容易逐项修正分类规则。
+- 更适合以后继续替换更强的 VLM 或时序模型。
+
+### 2) 收敛机器人动作模板
+
+本轮已经明显削弱/移除了以下容易显怪的内容：
+
+- 大幅下肢动作
+- 真实前后平移
+- 手爪开合表演
+- 过大的肩部摆幅
+
+现在动作更偏向：
+
+- 轻微抬臂
+- 小幅挥手
+- 轻微点头
+- 头部朝向与停顿
+- 小幅困惑歪头
+
+## 当前离线验证结果
+
+以下 4 条代表样例已经离线验证通过，分类与响应映射合理：
+
+- `waving__portrait_guy_waving_hand__QvJaZ0h94Eo.mp4`
+  - `HUMAN_WAVE_HELLO -> PET_GREET_HAPPY`
+- `pointing__pointing_gesture__emA8oMXjnb4.mp4`
+  - `HUMAN_POINT_DIRECTION -> PET_ORIENT_FOLLOW`
+- `stop__stop_palm_gesture__j7QHtHhw5as.mp4`
+  - `HUMAN_STOP_PALM -> PET_FREEZE_RESPECTFUL`
+- `thumbs_up__happy_man_thumbs_up__W09XgqL0cxg.mp4`
+  - `HUMAN_POSITIVE_ACK -> PET_EXCITED_ACK`
+
+另外两条也比之前更合理：
+
+- `shrug__shrugging_person__bx_US6Mwdhk.mp4`
+  - 现在识别为 `HUMAN_SHRUG_UNCERTAIN`
+- `yes_nod__woman_nod_yes__Ouk-bdR3L30.mp4`
+  - 现在识别为 `HUMAN_POSITIVE_ACK`
+
+## 仍然待继续优化的问题
+
+以下几条仍不够稳定，适合后续继续做：
+
+- `beckon__woman_come_here_beckon__9CeeTCQskFs.mp4`
+- `finger_no__no_no_finger_wave__82vLYYXukIE.mp4`
+- `no_shake__man_shake_head_no__yZ-351AUZqE.mp4`
+
+这些问题更像是“细粒度时序识别”问题，而不是动作模板问题。
+
 ## 目前最适合展示的样例
 
 以下几条最适合用来继续调自然度：
