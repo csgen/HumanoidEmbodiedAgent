@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import requests
+
 try:
     from openai import OpenAI
 except Exception:
@@ -82,6 +84,11 @@ or "greet()" function. You must COMPOSE motion from these primitives:
     idle(duration: float)
 
     speak(text: str)
+
+    navigate_to(delta_x: float, delta_y: float, delta_theta: float)
+        # Coarse demo locomotion primitive in Webots Supervisor mode.
+        # Useful for a small pet-like approach or backoff when the human's
+        # body language clearly invites or rejects the robot.
 
 # NAO coordinate convention
 - Torso-centred, right-hand frame. Units are METRES.
@@ -153,6 +160,15 @@ Meanings:
 - PET_EXCITED_ACK: the human shows positive approval, claps, gives thumbs-up, or nods yes.
 - PET_CONFUSED_HEAD_TILT: the human shrugs or seems unsure.
 - PET_WATCH_WAIT: the signal is unclear.
+
+Disambiguation rules:
+- Open palm facing the robot means PET_FREEZE_RESPECTFUL, not greeting.
+- Repeated hand wave toward self means PET_APPROACH_CURIOUS.
+- Extended arm or index finger indicating a direction/object means PET_ORIENT_FOLLOW.
+- Thumbs-up, clapping, or a clear yes nod means PET_EXCITED_ACK.
+- Head shaking no or finger wagging no-no means PET_SOFT_BACKOFF.
+- Shrugging with both shoulders/hands lifted means PET_CONFUSED_HEAD_TILT.
+- Greeting wave is a side-to-side hello wave to the robot, not a stop palm.
 
 Choose based on the full sequence, not a single frame. Output only one label."""
 
@@ -329,75 +345,115 @@ def _compile_local_semantics(label: str) -> Dict[str, Any]:
 def _compile_local_code(label: str) -> str:
     if label == 'PET_GREET_HAPPY':
         return """
+operate_gripper('right', 'open')
 move_joints({
     'HeadYaw': 0.0,
-    'HeadPitch': -0.08,
-    'RShoulderPitch': 0.38,
-    'RShoulderRoll': -0.48,
+    'HeadPitch': -0.10,
+    'LShoulderPitch': 1.36,
+    'RShoulderPitch': 0.34,
+    'RShoulderRoll': -0.50,
     'RElbowYaw': 1.18,
-    'RElbowRoll': 0.95,
-    'RWristYaw': 0.08,
-}, duration=0.95, trajectory='min_jerk')
+    'RElbowRoll': 0.98,
+    'RWristYaw': 0.20,
+}, duration=0.85, trajectory='min_jerk')
 hold(0.10)
-for target in (-0.30, -0.70, -0.30, -0.65, -0.45):
-    move_joint('RShoulderRoll', target, duration=0.22, trajectory='min_jerk')
+for target in (-0.22, -0.72, -0.22, -0.66, -0.32):
+    move_joint('RShoulderRoll', target, duration=0.18, trajectory='min_jerk')
+move_joint('RWristYaw', -0.12, duration=0.16, trajectory='min_jerk')
+move_joint('RWristYaw', 0.24, duration=0.16, trajectory='min_jerk')
+operate_gripper('right', 'close')
 move_joints({
+    'HeadPitch': 0.0,
+    'LShoulderPitch': 1.50,
+    'RShoulderPitch': 1.50,
+    'RShoulderRoll': -0.15,
+    'RElbowYaw': 1.20,
+    'RElbowRoll': 0.50,
+    'RWristYaw': 0.0,
+}, duration=0.82, trajectory='min_jerk')
+""".strip()
+
+    if label == 'PET_ORIENT_FOLLOW':
+        return """
+operate_gripper('right', 'open')
+move_joints({
+    'HeadYaw': 0.42,
+    'HeadPitch': -0.10,
+    'RShoulderPitch': 0.88,
+    'RShoulderRoll': -0.16,
+    'RElbowYaw': 1.10,
+    'RElbowRoll': 0.30,
+    'RWristYaw': -0.20,
+}, duration=0.72, trajectory='min_jerk')
+hold(0.70)
+move_joints({
+    'HeadYaw': 0.0,
     'HeadPitch': 0.0,
     'RShoulderPitch': 1.50,
     'RShoulderRoll': -0.15,
     'RElbowYaw': 1.20,
     'RElbowRoll': 0.50,
     'RWristYaw': 0.0,
-}, duration=0.90, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_ORIENT_FOLLOW':
-        return """
-move_joints({
-    'HeadYaw': 0.35,
-    'HeadPitch': -0.10,
-    'LShoulderPitch': 1.20,
-    'LShoulderRoll': 0.24,
-    'LElbowYaw': -1.05,
-    'LElbowRoll': -0.72,
-}, duration=0.75, trajectory='min_jerk')
-hold(0.60)
-move_joints({
-    'HeadYaw': 0.0,
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'LShoulderRoll': 0.15,
-    'LElbowYaw': -1.20,
-    'LElbowRoll': -0.50,
-}, duration=0.80, trajectory='min_jerk')
+}, duration=0.84, trajectory='min_jerk')
+operate_gripper('right', 'close')
 """.strip()
 
     if label == 'PET_APPROACH_CURIOUS':
         return """
+operate_gripper('left', 'open')
+operate_gripper('right', 'open')
 move_joints({
     'HeadPitch': -0.16,
-    'LShoulderPitch': 1.28,
-    'RShoulderPitch': 1.28,
-}, duration=0.55, trajectory='min_jerk')
-move_joint('HeadYaw', 0.10, duration=0.25, trajectory='min_jerk')
-move_joint('HeadYaw', -0.08, duration=0.25, trajectory='min_jerk')
-move_joint('HeadYaw', 0.0, duration=0.25, trajectory='min_jerk')
-idle(0.70)
+    'LShoulderPitch': 1.16,
+    'RShoulderPitch': 1.16,
+    'LElbowRoll': -0.68,
+    'RElbowRoll': 0.68,
+}, duration=0.52, trajectory='min_jerk')
+navigate_to(0.08, 0.0, 0.0)
+move_joint('HeadYaw', 0.12, duration=0.22, trajectory='min_jerk')
+move_joint('HeadYaw', -0.10, duration=0.22, trajectory='min_jerk')
+move_joint('HeadYaw', 0.0, duration=0.22, trajectory='min_jerk')
+hold(0.30)
+move_joints({
+    'HeadPitch': 0.0,
+    'LShoulderPitch': 1.50,
+    'RShoulderPitch': 1.50,
+    'LElbowRoll': -0.50,
+    'RElbowRoll': 0.50,
+}, duration=0.70, trajectory='min_jerk')
+operate_gripper('left', 'close')
+operate_gripper('right', 'close')
 """.strip()
 
     if label == 'PET_FREEZE_RESPECTFUL':
         return """
 move_joints({
-    'HeadPitch': 0.18,
+    'HeadPitch': 0.16,
     'LShoulderPitch': 1.62,
     'RShoulderPitch': 1.62,
+    'LElbowRoll': -0.36,
+    'RElbowRoll': 0.36,
+    'LHipPitch': -0.10,
+    'RHipPitch': -0.10,
+    'LKneePitch': 0.22,
+    'RKneePitch': 0.22,
+    'LAnklePitch': -0.08,
+    'RAnklePitch': -0.08,
 }, duration=0.45, trajectory='min_jerk')
 hold(0.90)
 move_joints({
     'HeadPitch': 0.0,
     'LShoulderPitch': 1.50,
     'RShoulderPitch': 1.50,
-}, duration=0.55, trajectory='min_jerk')
+    'LElbowRoll': -0.50,
+    'RElbowRoll': 0.50,
+    'LHipPitch': 0.0,
+    'RHipPitch': 0.0,
+    'LKneePitch': 0.0,
+    'RKneePitch': 0.0,
+    'LAnklePitch': 0.0,
+    'RAnklePitch': 0.0,
+}, duration=0.62, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_SOFT_BACKOFF':
@@ -407,46 +463,99 @@ move_joints({
     'HeadPitch': 0.12,
     'LShoulderPitch': 1.58,
     'RShoulderPitch': 1.58,
+    'LHipPitch': -0.06,
+    'RHipPitch': -0.06,
+    'LKneePitch': 0.14,
+    'RKneePitch': 0.14,
 }, duration=0.50, trajectory='min_jerk')
-hold(0.65)
-move_joint('HeadYaw', 0.0, duration=0.35, trajectory='min_jerk')
-idle(0.50)
+navigate_to(-0.06, 0.0, 0.0)
+hold(0.30)
+move_joints({
+    'HeadYaw': 0.0,
+    'HeadPitch': 0.0,
+    'LShoulderPitch': 1.50,
+    'RShoulderPitch': 1.50,
+    'LHipPitch': 0.0,
+    'RHipPitch': 0.0,
+    'LKneePitch': 0.0,
+    'RKneePitch': 0.0,
+}, duration=0.55, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_EXCITED_ACK':
         return """
 move_joints({
     'HeadPitch': -0.10,
-    'LShoulderPitch': 1.22,
-    'RShoulderPitch': 1.22,
-}, duration=0.50, trajectory='min_jerk')
-move_joint('HeadPitch', 0.03, duration=0.18, trajectory='min_jerk')
-move_joint('HeadPitch', -0.10, duration=0.18, trajectory='min_jerk')
-move_joint('HeadPitch', 0.03, duration=0.18, trajectory='min_jerk')
+    'LShoulderPitch': 1.08,
+    'RShoulderPitch': 1.08,
+    'LShoulderRoll': 0.26,
+    'RShoulderRoll': -0.26,
+    'LHipPitch': -0.08,
+    'RHipPitch': -0.08,
+    'LKneePitch': 0.18,
+    'RKneePitch': 0.18,
+}, duration=0.42, trajectory='min_jerk')
+move_joint('HeadPitch', 0.04, duration=0.16, trajectory='min_jerk')
+move_joint('HeadPitch', -0.10, duration=0.16, trajectory='min_jerk')
+move_joint('HeadPitch', 0.04, duration=0.16, trajectory='min_jerk')
+move_joints({
+    'LShoulderPitch': 0.92,
+    'RShoulderPitch': 0.92,
+    'LKneePitch': 0.28,
+    'RKneePitch': 0.28,
+}, duration=0.18, trajectory='min_jerk')
+move_joints({
+    'LShoulderPitch': 1.15,
+    'RShoulderPitch': 1.15,
+    'LKneePitch': 0.12,
+    'RKneePitch': 0.12,
+}, duration=0.18, trajectory='min_jerk')
 move_joints({
     'LShoulderPitch': 1.50,
     'RShoulderPitch': 1.50,
     'HeadPitch': 0.0,
-}, duration=0.50, trajectory='min_jerk')
+    'LShoulderRoll': 0.15,
+    'RShoulderRoll': -0.15,
+    'LHipPitch': 0.0,
+    'RHipPitch': 0.0,
+    'LKneePitch': 0.0,
+    'RKneePitch': 0.0,
+}, duration=0.48, trajectory='min_jerk')
 """.strip()
 
     if label == 'PET_CONFUSED_HEAD_TILT':
         return """
+operate_gripper('left', 'open')
+operate_gripper('right', 'open')
 move_joints({
-    'HeadYaw': 0.20,
+    'HeadYaw': 0.22,
     'HeadPitch': -0.04,
-    'LShoulderRoll': 0.24,
-    'RShoulderRoll': -0.24,
+    'LShoulderPitch': 1.30,
+    'RShoulderPitch': 1.30,
+    'LShoulderRoll': 0.34,
+    'RShoulderRoll': -0.34,
+    'LElbowYaw': -0.82,
+    'RElbowYaw': 0.82,
+    'LElbowRoll': -0.92,
+    'RElbowRoll': 0.92,
 }, duration=0.45, trajectory='min_jerk')
-hold(0.45)
-move_joint('HeadYaw', -0.20, duration=0.40, trajectory='min_jerk')
 hold(0.35)
+move_joint('HeadYaw', -0.18, duration=0.36, trajectory='min_jerk')
+hold(0.25)
 move_joints({
     'HeadYaw': 0.0,
     'HeadPitch': 0.0,
+    'LShoulderPitch': 1.50,
+    'RShoulderPitch': 1.50,
     'LShoulderRoll': 0.15,
     'RShoulderRoll': -0.15,
-}, duration=0.50, trajectory='min_jerk')
+    'LElbowYaw': -1.20,
+    'RElbowYaw': 1.20,
+    'LElbowRoll': -0.50,
+    'RElbowRoll': 0.50,
+}, duration=0.52, trajectory='min_jerk')
+operate_gripper('left', 'close')
+operate_gripper('right', 'close')
 """.strip()
 
     return "idle(1.00)"
@@ -585,6 +694,9 @@ class VLMClient:
         if not frames_b64:
             return VLMResponse({}, '', '', 0.0, False, error='no frames provided')
 
+        if config.LOCAL_VLM_SERVER_URL:
+            return self._call_local_server(frames_b64)
+
         t0 = time.time()
         try:
             images = _decode_frames_to_pil(frames_b64)
@@ -608,6 +720,30 @@ class VLMClient:
                 indent=2,
             )
             return VLMResponse(semantic, code, raw, time.time() - t0, True)
+        except Exception as exc:
+            return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
+
+    def _call_local_server(self, frames_b64: Sequence[str]) -> VLMResponse:
+        t0 = time.time()
+        try:
+            rsp = requests.post(
+                config.LOCAL_VLM_SERVER_URL.rstrip('/') + '/classify_frames',
+                json={
+                    'frames_b64': list(frames_b64),
+                    'model': self.model,
+                },
+                timeout=max(30.0, config.ONE_SHOT_VLM_TIMEOUT),
+            )
+            rsp.raise_for_status()
+            payload = rsp.json()
+            return VLMResponse(
+                semantic_context=payload.get('semantic_context') or {},
+                python_code=payload.get('python_code') or '',
+                raw_text=payload.get('raw_text') or '',
+                elapsed_seconds=float(payload.get('elapsed_seconds') or (time.time() - t0)),
+                ok=bool(payload.get('ok')),
+                error=payload.get('error'),
+            )
         except Exception as exc:
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
 

@@ -543,9 +543,65 @@ def _wait_for_frame_buffer(
     return False
 
 
+def _is_video_file_source(source) -> bool:
+    if isinstance(source, int):
+        return False
+    if not isinstance(source, str):
+        return False
+    if '://' in source:
+        return False
+    suffix = Path(source).suffix.lower()
+    return suffix in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+
+
+def _wait_for_video_progress(
+    robot: Supervisor,
+    vlm_api: NaoVlmAPI,
+    buffer: FrameBuffer,
+    timestep: int,
+    settle_s: float,
+) -> bool:
+    deadline = time.time() + max(0.0, settle_s)
+    while time.time() < deadline:
+        if robot.step(timestep) == -1:
+            return False
+        vlm_api._sync_sensors()
+        if not buffer.is_alive and len(buffer) >= config.VLM_FRAME_COUNT:
+            return True
+    return True
+
+
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding='utf-8')
+
+
+def _sample_frames_from_video_file(path: str, n: int) -> List[str]:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return []
+
+    frames: List[np.ndarray] = []
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            frames.append(frame)
+    finally:
+        cap.release()
+
+    if len(frames) < max(1, n):
+        return []
+
+    indices = np.linspace(0, len(frames) - 1, n).astype(int)
+    out: List[str] = []
+    for idx in indices:
+        ok, buf = cv2.imencode('.jpg', frames[int(idx)], [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            continue
+        out.append(base64.b64encode(buf.tobytes()).decode('ascii'))
+    return out
 
 
 def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None) -> Path:
@@ -607,12 +663,37 @@ def _run_oneshot_demo(
         print('[oneshot] ERROR: frame buffer did not fill before timeout or simulation ended.')
         return
 
-    frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
+    if _is_video_file_source(config.WEBCAM_SOURCE):
+        settle_s = config.ONE_SHOT_VIDEO_SETTLE_SECONDS
+        if settle_s <= 0.0:
+            settle_s = max(config.VLM_WINDOW_SECONDS, config.FRAME_BUFFER_SECONDS)
+        print(f'[oneshot] video source detected; allowing playback to progress for {settle_s:.2f}s before sampling...')
+        if not _wait_for_video_progress(
+            robot=robot,
+            vlm_api=vlm_api,
+            buffer=buffer,
+            timestep=timestep,
+            settle_s=settle_s,
+        ):
+            print('[oneshot] ERROR: simulation ended while waiting for video progress.')
+            return
+
+        direct_frames = _sample_frames_from_video_file(config.WEBCAM_SOURCE, config.VLM_FRAME_COUNT)
+        if direct_frames:
+            frames = direct_frames
+            print(f'[oneshot] sampled {len(frames)} frame(s) directly from source video {config.WEBCAM_SOURCE!r}')
+        else:
+            frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
+            print(f'[oneshot] fallback to buffer sampling: {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
+    else:
+        frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
+
     if not frames:
         print('[oneshot] ERROR: failed to sample frames from buffer.')
         return
 
-    print(f'[oneshot] sampled {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
+    if not _is_video_file_source(config.WEBCAM_SOURCE):
+        print(f'[oneshot] sampled {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
     print('[oneshot] sending frames to VLM...')
     result_queue: queue.Queue = queue.Queue(maxsize=1)
 
@@ -735,6 +816,7 @@ def main():
         'hold': vlm_api.hold,
         'idle': vlm_api.idle,
         'speak': vlm_api.speak,
+        'navigate_to': vlm_api.navigate_to,
         # Legacy aliases so existing prompts still work:
         'look_at': vlm_api.look_at,
         'move_arm': vlm_api.move_arm,

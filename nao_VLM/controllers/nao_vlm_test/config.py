@@ -38,10 +38,10 @@ else:
         WEBCAM_SOURCE = str(_resolved)
 
 # FrameBuffer parameters
-FRAME_BUFFER_SECONDS = 2.0       # rolling window length
-FRAME_BUFFER_FPS = 10            # capture rate; also controls motion-score update rate
-VLM_FRAME_COUNT = 5              # number of frames sampled per VLM call
-VLM_WINDOW_SECONDS = 1.5         # conceptual span of the sampled sequence (for prompt text)
+FRAME_BUFFER_SECONDS = float(os.getenv('FRAME_BUFFER_SECONDS', '2.0'))
+FRAME_BUFFER_FPS = int(os.getenv('FRAME_BUFFER_FPS', '10'))
+VLM_FRAME_COUNT = int(os.getenv('VLM_FRAME_COUNT', '5'))
+VLM_WINDOW_SECONDS = float(os.getenv('VLM_WINDOW_SECONDS', '1.5'))
 FRAMEBUFFER_BACKEND = os.getenv('FRAMEBUFFER_BACKEND', 'auto').strip().lower()
 FRAMEBUFFER_WIDTH = int(os.getenv('FRAMEBUFFER_WIDTH', '1280'))
 FRAMEBUFFER_HEIGHT = int(os.getenv('FRAMEBUFFER_HEIGHT', '720'))
@@ -55,6 +55,8 @@ ONE_SHOT_VLM_TIMEOUT = float(os.getenv('ONE_SHOT_VLM_TIMEOUT', '90.0'))
 ONE_SHOT_EXIT_AFTER_EXECUTE = os.getenv('ONE_SHOT_EXIT_AFTER_EXECUTE', '1').strip().lower() not in {
     '0', 'false', 'no'
 }
+ONE_SHOT_VIDEO_SETTLE_SECONDS = float(os.getenv('ONE_SHOT_VIDEO_SETTLE_SECONDS', '0.0'))
+ONE_SHOT_VIDEO_CAPTURE_MODE = os.getenv('ONE_SHOT_VIDEO_CAPTURE_MODE', 'recent').strip().lower()
 
 # ---------------------------------------------------------------------------
 # VLM trigger (state-aware)
@@ -75,6 +77,7 @@ VLM_TEMPERATURE = 0.2
 VLM_IMAGE_DETAIL = 'low'         # 'low' ≈ 85 tokens/image, 'high' ≈ 1100+ tokens
 VLM_SCENARIO_HINT = os.getenv('VLM_SCENARIO_HINT', '').strip()
 LOCAL_VLM_MODEL = os.getenv('LOCAL_VLM_MODEL', 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct').strip()
+LOCAL_VLM_SERVER_URL = os.getenv('LOCAL_VLM_SERVER_URL', '').strip()
 
 # ---------------------------------------------------------------------------
 # Robot control
@@ -131,3 +134,4 @@ REPO_ROOT = _REPO_ROOT
 VIDEOS_DIR = _REPO_ROOT / 'videos'
 LOG_DIR = _REPO_ROOT / 'logs'
 ARTIFACTS_DIR = _REPO_ROOT / 'artifacts' / 'oneshot'
+DEMO_RECORDINGS_DIR = _REPO_ROOT / 'artifacts' / 'screen_recordings'
