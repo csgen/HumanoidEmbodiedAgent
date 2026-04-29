@@ -117,126 +117,20 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - Reusing the same wrist-only oscillation for unrelated clips is incorrect.
 - Base side choice, dominant joints, tempo, and hold-vs-oscillation decisions on
   the actual frame sequence.
-- If the human motion is mostly static, prefer orienting and holding instead of
-  repetitive oscillation.
-- If the motion is laterally directed, head yaw / shoulder roll / elbow yaw may
-  dominate more than head pitch.
-- If the motion is vertically directed, head pitch / shoulder pitch may matter
-  more than head yaw.
-- If the clip shows bilateral openness or approval, a symmetric two-arm response
-  is acceptable.
+- If the human motion is mostly static, orienting and holding are often more
+  grounded than repeated oscillation.
+- If the motion is lateral or directional, let head/arm orientation naturally
+  reflect that direction when appropriate.
+- If the human appears approving, welcoming, or playful, a gentle pet-like
+  acknowledgment is acceptable, but do not hardcode any named response.
 
-# Style examples (for guidance only — do NOT copy blindly)
-
-Example A — friendly greeting near the robot:
-```json
-{{
-  "intent": "the human greets the robot with a friendly wave",
-  "social_distance": "close",
-  "affect": "friendly",
-  "confidence": 0.88,
-  "motion_dynamics": "oscillatory"
-}}
-```
-```python
-move_joints({{
-    'HeadPitch': -0.08,
-    'RShoulderPitch': 0.85,
-    'RShoulderRoll': -0.18,
-    'RElbowYaw': 1.10,
-    'RElbowRoll': 0.70,
-    'RWristYaw': 0.05,
-}}, duration=0.60, trajectory='min_jerk')
-oscillate_joint('RWristYaw', center=0.05, amplitude=0.22, frequency=1.3, duration=0.90, decay=1.0)
-move_joints({{
-    'HeadPitch': 0.0,
-    'RShoulderPitch': 1.50,
-    'RShoulderRoll': -0.15,
-    'RElbowYaw': 1.20,
-    'RElbowRoll': 0.50,
-    'RWristYaw': 0.0,
-}}, duration=0.55, trajectory='min_jerk')
-```
-
-Example B — follow a pointing cue with curiosity:
-```json
-{{
-  "intent": "the human indicates a direction or object",
-  "social_distance": "close",
-  "affect": "curious",
-  "confidence": 0.84,
-  "motion_dynamics": "static"
-}}
-```
-```python
-move_joints({{
-    'HeadYaw': 0.35,
-    'HeadPitch': -0.05,
-    'RShoulderPitch': 1.00,
-    'RShoulderRoll': -0.10,
-    'RElbowYaw': 1.00,
-    'RElbowRoll': 0.45,
-}}, duration=0.55, trajectory='min_jerk')
-hold(0.45)
-move_joints({{
-    'HeadYaw': 0.0,
-    'HeadPitch': 0.0,
-    'RShoulderPitch': 1.50,
-    'RShoulderRoll': -0.15,
-    'RElbowYaw': 1.20,
-    'RElbowRoll': 0.50,
-}}, duration=0.50, trajectory='min_jerk')
-```
-
-Example C — respectful stop response:
-```json
-{{
-  "intent": "the human asks the robot to stop or pause",
-  "social_distance": "close",
-  "affect": "neutral",
-  "confidence": 0.90,
-  "motion_dynamics": "static"
-}}
-```
-```python
-move_joints({{
-    'HeadPitch': 0.10,
-    'LShoulderPitch': 1.55,
-    'RShoulderPitch': 1.55,
-    'LElbowRoll': -0.45,
-    'RElbowRoll': 0.45,
-}}, duration=0.35, trajectory='min_jerk')
-hold(0.90)
-```
-
-Example D — positive acknowledgment like a pet:
-```json
-{{
-  "intent": "the human shows approval or encouragement",
-  "social_distance": "close",
-  "affect": "happy",
-  "confidence": 0.86,
-  "motion_dynamics": "raising"
-}}
-```
-```python
-move_joints({{
-    'HeadPitch': -0.06,
-    'LShoulderPitch': 1.18,
-    'RShoulderPitch': 1.18,
-    'LShoulderRoll': 0.20,
-    'RShoulderRoll': -0.20,
-}}, duration=0.40, trajectory='min_jerk')
-move_joint('HeadPitch', 0.02, duration=0.18, trajectory='min_jerk')
-move_joint('HeadPitch', -0.05, duration=0.18, trajectory='min_jerk')
-move_joints({{
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'LShoulderRoll': 0.15,
-    'RShoulderRoll': -0.15,
-}}, duration=0.45, trajectory='min_jerk')
-```
+# Composition guidance
+- Prefer short sequences of 2-5 primitive calls.
+- Use `move_joints(...)` when a coordinated upper-body posture is needed.
+- Use `hold(...)` when the response should pause, freeze, or attend.
+- Use `oscillate_joint(...)` only when the observed motion really suggests a
+  rhythmic or waving-like response.
+- Return smoothly toward a calm upper-body posture after a dynamic motion.
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
@@ -345,6 +239,31 @@ Reason for refinement:
 {error_text}
 
 Return ONLY a corrected JSON block and corrected Python block.
+"""
+
+_LOCAL_SELECTION_PROMPT_TEMPLATE = """You must choose the BEST candidate robot response for the SAME video clip.
+
+Selection rules:
+- Choose the candidate that is most grounded in the actual video frames.
+- Prefer the candidate that feels most natural, short, smooth, and pet-like.
+- Prefer upper-body only behavior.
+- Reject candidates that look generic, repetitive, or unrelated to the observed motion.
+- Reject candidates that use walking, lower-body joints, or obviously unsafe motion.
+- If more than one candidate is plausible, choose the one with the clearest social appropriateness.
+
+Cheap motion summary from the clip:
+{motion_summary}
+
+Candidates:
+{candidate_blocks}
+
+Return ONLY the chosen candidate number in this exact form:
+
+```text
+CHOSEN_CANDIDATE: <integer>
+```
+
+Do not explain your choice. Do not output JSON or Python here.
 """
 
 _LOCAL_MODEL_LOCK = Lock()
@@ -587,83 +506,11 @@ def _build_static_validator(joint_limits: Dict[str, Tuple[float, float]]) -> San
     return executor
 
 
-def _score_candidate_response(semantic: Dict[str, Any], code: str, summary: Optional[Dict[str, Any]] = None) -> float:
+def _candidate_has_minimal_structure(semantic: Dict[str, Any], code: str) -> bool:
     if not semantic or not code:
-        return -1e9
-
+        return False
     calls = _parse_code_calls(code)
-    if not calls:
-        return -1e9
-
-    score = 0.0
-    fn_names = [name for name, _ in calls]
-    unique_fns = set(fn_names)
-
-    score += 2.0 * min(len(unique_fns), 4)
-    score += 0.6 * min(len(calls), 6)
-
-    if 'move_joints' in unique_fns:
-        score += 2.0
-    if 'move_joint' in unique_fns:
-        score += 1.0
-    if 'hold' in unique_fns:
-        score += 0.8
-    if 'oscillate_joint' in unique_fns:
-        score += 0.6
-    if 'move_arm_ik' in unique_fns:
-        score += 1.0
-
-    if 'navigate_to' in code:
-        score -= 20.0
-
-    lower_markers = ('Hip', 'Knee', 'Ankle')
-    if any(marker in code for marker in lower_markers):
-        score -= 20.0
-
-    if 'RWristYaw' in code and len(unique_fns) <= 2 and 'move_joints' not in unique_fns:
-        score -= 3.0
-
-    if code.count('oscillate_joint') >= 3:
-        score -= 2.0
-
-    intent = str(semantic.get('intent') or '').strip()
-    affect = str(semantic.get('affect') or '').strip()
-    dynamics = str(semantic.get('motion_dynamics') or '').strip()
-    social = str(semantic.get('social_distance') or '').strip()
-
-    if intent:
-        score += 1.2
-    if affect:
-        score += 0.6
-    if dynamics:
-        score += 0.6
-    if social:
-        score += 0.4
-
-    summary = summary or {}
-    dominant_axis = str(summary.get('dominant_axis') or '')
-    activity = str(summary.get('activity_level') or '')
-
-    if dominant_axis == 'horizontal':
-        if any(key in code for key in ('HeadYaw', 'ShoulderRoll', 'ElbowYaw')):
-            score += 2.5
-        if 'RWristYaw' in code and 'HeadYaw' not in code and 'ShoulderRoll' not in code and 'ElbowYaw' not in code:
-            score -= 2.5
-    elif dominant_axis == 'vertical':
-        if any(key in code for key in ('HeadPitch', 'ShoulderPitch', 'hold(')):
-            score += 2.5
-        if 'RWristYaw' in code and 'HeadPitch' not in code and 'ShoulderPitch' not in code:
-            score -= 2.5
-    elif dominant_axis == 'static':
-        if 'hold(' in code:
-            score += 2.5
-        if code.count('oscillate_joint') >= 1:
-            score -= 2.0
-
-    if activity in {'medium', 'low'} and code.count('oscillate_joint') >= 2:
-        score -= 1.5
-
-    return score
+    return bool(calls)
 
 
 def _looks_too_generic_for_clip(semantic: Dict[str, Any], code: str) -> bool:
@@ -759,6 +606,37 @@ def _load_local_model(model_id: str):
         _LOCAL_MODEL = model
         _LOCAL_MODEL_KIND = kind
         return processor, model, kind
+
+
+def _load_local_model_on_cpu(model_id: str):
+    import torch
+
+    kind = _normalize_model_kind(model_id)
+    dtype = torch.float32
+
+    if kind == 'qwen2_5_vl':
+        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+        processor = AutoProcessor.from_pretrained(model_id)
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map=None,
+        )
+        model = model.to('cpu')
+    else:
+        from transformers import AutoModelForImageTextToText, AutoProcessor
+
+        processor = AutoProcessor.from_pretrained(model_id)
+        model = AutoModelForImageTextToText.from_pretrained(
+            model_id,
+            dtype=dtype,
+            device_map=None,
+        )
+        model = model.to('cpu')
+
+    model.eval()
+    return processor, model, kind
 
 
 def _qwen_multi_image_generate(processor, model, images, system_prompt: str, user_prompt: str, do_sample: bool = False) -> str:
@@ -864,6 +742,11 @@ def _smolvlm_multi_image_generate_with_prompt(processor, model, images, system_p
     return processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
 
 
+def _is_probable_cuda_oom(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return 'out of memory' in text or 'cuda out of memory' in text
+
+
 def _build_repair_prompt(semantic_context: Dict[str, Any], python_code: str, error_text: str) -> str:
     return _LOCAL_REPAIR_PROMPT_TEMPLATE.format(
         semantic_json=json.dumps(semantic_context or {}, ensure_ascii=False, indent=2),
@@ -909,6 +792,29 @@ def _build_refinement_prompt_with_summary(
         + "\n\nCheap motion summary from the same frames:\n"
         + json.dumps(summary, ensure_ascii=False, indent=2)
         + "\nUse it to produce a less generic and more clip-specific result."
+    )
+
+
+def _format_candidate_blocks(candidates: Sequence[Tuple[Dict[str, Any], str]]) -> str:
+    blocks = []
+    for index, (semantic, code) in enumerate(candidates, start=1):
+        block = (
+            f"Candidate {index}\n"
+            "```json\n"
+            f"{json.dumps(semantic or {}, ensure_ascii=False, indent=2)}\n"
+            "```\n"
+            "```python\n"
+            f"{code or ''}\n"
+            "```"
+        )
+        blocks.append(block)
+    return "\n\n".join(blocks)
+
+
+def _build_selection_prompt(summary: Dict[str, Any], candidates: Sequence[Tuple[Dict[str, Any], str]]) -> str:
+    return _LOCAL_SELECTION_PROMPT_TEMPLATE.format(
+        motion_summary=json.dumps(summary or {}, ensure_ascii=False, indent=2),
+        candidate_blocks=_format_candidate_blocks(candidates),
     )
 
 
@@ -1104,27 +1010,42 @@ class VLMClient:
                     raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=do_sample)
                 raw_candidates.append(raw)
 
-            best_semantic: Dict[str, Any] = {}
-            best_code = ''
-            best_raw = raw_candidates[0] if raw_candidates else ''
-            best_score = -1e9
+            parsed_candidates: List[Tuple[Dict[str, Any], str, str]] = []
+            valid_candidates: List[Tuple[Dict[str, Any], str, str]] = []
 
             for raw in raw_candidates:
                 semantic, code = parse_vlm_output(raw)
                 code = _normalize_generated_code(code)
-                score = _score_candidate_response(semantic, code, summary)
+                if not _candidate_has_minimal_structure(semantic, code):
+                    if config.LOCAL_VLM_DEBUG:
+                        print(f'[VLMClient][local] candidate rejected: parse/min-structure failed semantic={semantic}')
+                    continue
+                parsed_candidates.append((semantic, code, raw))
                 validation = self.static_validator.validate(code)
-                if validation.ok:
-                    score += 3.0
-                else:
-                    score -= 6.0
                 if config.LOCAL_VLM_DEBUG:
-                    print(f'[VLMClient][local] candidate score={score:.2f} valid={validation.ok} semantic={semantic}')
-                if score > best_score:
-                    best_score = score
-                    best_semantic = semantic
-                    best_code = code
-                    best_raw = raw
+                    print(f'[VLMClient][local] candidate valid={validation.ok} semantic={semantic}')
+                if validation.ok:
+                    valid_candidates.append((semantic, code, raw))
+
+            pool = valid_candidates or parsed_candidates
+            if not pool:
+                return VLMResponse({}, '', raw_candidates[0] if raw_candidates else '', time.time() - t0, False, error='parse_incomplete')
+
+            if len(pool) == 1:
+                best_semantic, best_code, best_raw = pool[0]
+            else:
+                selection_prompt = _build_selection_prompt(summary, [(semantic, code) for semantic, code, _ in pool])
+                if kind == 'qwen2_5_vl':
+                    selected_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, selection_prompt)
+                else:
+                    selected_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, selection_prompt)
+                chosen_index = parse_chosen_candidate_index(selected_raw)
+                if config.LOCAL_VLM_DEBUG:
+                    print(f'[VLMClient][local] chosen candidate raw={selected_raw!r} parsed_index={chosen_index}')
+                if chosen_index is not None and 1 <= chosen_index <= len(pool):
+                    best_semantic, best_code, best_raw = pool[chosen_index - 1]
+                else:
+                    best_semantic, best_code, best_raw = pool[0]
 
             if best_code and _looks_too_generic_for_clip(best_semantic, best_code):
                 refinement_prompt = _build_refinement_prompt_with_summary(
@@ -1139,19 +1060,29 @@ class VLMClient:
                     refined_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, refinement_prompt)
                 refined_semantic, refined_code = parse_vlm_output(refined_raw)
                 refined_code = _normalize_generated_code(refined_code)
-                refined_score = _score_candidate_response(refined_semantic, refined_code, summary)
                 refined_validation = self.static_validator.validate(refined_code)
-                if refined_validation.ok:
-                    refined_score += 3.0
-                else:
-                    refined_score -= 6.0
                 if config.LOCAL_VLM_DEBUG:
-                    print(f'[VLMClient][local] refinement score={refined_score:.2f} valid={refined_validation.ok} semantic={refined_semantic}')
-                if refined_score >= best_score and refined_code:
-                    best_score = refined_score
-                    best_semantic = refined_semantic
-                    best_code = refined_code
-                    best_raw = refined_raw
+                    print(f'[VLMClient][local] refinement valid={refined_validation.ok} semantic={refined_semantic}')
+                if _candidate_has_minimal_structure(refined_semantic, refined_code) and refined_validation.ok:
+                    best_semantic, best_code, best_raw = refined_semantic, refined_code, refined_raw
+
+            if (not best_code or not best_semantic) and parsed_candidates:
+                fallback_semantic, fallback_code, _ = parsed_candidates[0]
+                parse_repair_prompt = _build_repair_prompt_with_summary(
+                    frames_b64,
+                    fallback_semantic,
+                    fallback_code,
+                    'candidate_parse_or_selection_failed',
+                )
+                if kind == 'qwen2_5_vl':
+                    repaired_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
+                else:
+                    repaired_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
+                repaired_semantic, repaired_code = parse_vlm_output(repaired_raw)
+                repaired_code = _normalize_generated_code(repaired_code)
+                repaired_validation = self.static_validator.validate(repaired_code)
+                if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
+                    best_semantic, best_code, best_raw = repaired_semantic, repaired_code, repaired_raw
 
             ok = bool(best_code) and bool(best_semantic)
             return VLMResponse(
@@ -1163,6 +1094,40 @@ class VLMClient:
                 error=None if ok else 'parse_incomplete',
             )
         except Exception as exc:
+            if _is_probable_cuda_oom(exc):
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    processor, model, kind = _load_local_model_on_cpu(self.model)
+                    images = _decode_frames_to_pil(frames_b64)
+                    summary = _infer_visual_motion_summary(frames_b64)
+                    user_prompt = _build_local_user_prompt(frames_b64)
+                    if kind == 'qwen2_5_vl':
+                        raw = _qwen_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=False)
+                    else:
+                        raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=False)
+                    semantic, code = parse_vlm_output(raw)
+                    code = _normalize_generated_code(code)
+                    if (not _candidate_has_minimal_structure(semantic, code)) or (not self.static_validator.validate(code).ok):
+                        repair_prompt = _build_repair_prompt_with_summary(frames_b64, semantic, code, 'cpu_fallback_repair')
+                        if kind == 'qwen2_5_vl':
+                            raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
+                        else:
+                            raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
+                        semantic, code = parse_vlm_output(raw)
+                        code = _normalize_generated_code(code)
+                    ok = bool(code) and bool(semantic)
+                    return VLMResponse(
+                        semantic_context=semantic,
+                        python_code=code,
+                        raw_text=raw,
+                        elapsed_seconds=time.time() - t0,
+                        ok=ok,
+                        error=None if ok else 'parse_incomplete_cpu_fallback',
+                    )
+                except Exception as nested_exc:
+                    return VLMResponse({}, '', '', time.time() - t0, False, error=str(nested_exc))
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
 
     def _call_local_server(self, frames_b64: Sequence[str]) -> VLMResponse:
@@ -1220,6 +1185,7 @@ class VLMClient:
 
 _JSON_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
 _PYTHON_RE = re.compile(r"```python\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+_CHOSEN_CANDIDATE_RE = re.compile(r"CHOSEN_CANDIDATE\s*:\s*(\d+)", re.IGNORECASE)
 
 
 def parse_vlm_output(raw_text: str) -> Tuple[Dict[str, Any], str]:
@@ -1238,3 +1204,13 @@ def parse_vlm_output(raw_text: str) -> Tuple[Dict[str, Any], str]:
         code = textwrap.dedent(match_python.group(1)).strip()
 
     return semantic, code
+
+
+def parse_chosen_candidate_index(raw_text: str) -> Optional[int]:
+    match = _CHOSEN_CANDIDATE_RE.search(raw_text or '')
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except Exception:
+        return None
