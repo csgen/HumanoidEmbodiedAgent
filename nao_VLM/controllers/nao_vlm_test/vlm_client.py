@@ -544,9 +544,21 @@ def _normalize_model_kind(model_id: str) -> str:
     lowered = model_id.lower()
     if 'qwen2.5-vl' in lowered:
         return 'qwen2_5_vl'
+    if 'qwen2-vl' in lowered:
+        return 'qwen2_vl'
     if 'smolvlm' in lowered:
         return 'smolvlm'
     raise ValueError(f'Unsupported local model {model_id!r}')
+
+
+def _should_use_4bit(model_id: str) -> bool:
+    setting = config.LOCAL_VLM_LOAD_IN_4BIT
+    if setting in {'1', 'true', 'yes'}:
+        return True
+    if setting in {'0', 'false', 'no'}:
+        return False
+    lowered = model_id.lower()
+    return '7b' in lowered or '72b' in lowered
 
 
 def _load_local_model(model_id: str):
@@ -573,16 +585,33 @@ def _load_local_model(model_id: str):
 
         kind = _normalize_model_kind(model_id)
         dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        quantization_config = None
+        if torch.cuda.is_available() and _should_use_4bit(model_id):
+            try:
+                from transformers import BitsAndBytesConfig
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type='nf4',
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+            except Exception as exc:
+                print(f'[VLMClient] 4-bit quantization unavailable, fallback to normal load: {exc}')
 
-        if kind == 'qwen2_5_vl':
-            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+        if kind in {'qwen2_5_vl', 'qwen2_vl'}:
+            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration, Qwen2VLForConditionalGeneration
+
+            model_cls = Qwen2_5_VLForConditionalGeneration if kind == 'qwen2_5_vl' else Qwen2VLForConditionalGeneration
 
             processor = AutoProcessor.from_pretrained(model_id)
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_id,
-                torch_dtype=dtype,
-                device_map='auto' if torch.cuda.is_available() else None,
-            )
+            load_kwargs = {
+                'device_map': 'auto' if torch.cuda.is_available() else None,
+            }
+            if quantization_config is not None:
+                load_kwargs['quantization_config'] = quantization_config
+            else:
+                load_kwargs['torch_dtype'] = dtype
+            model = model_cls.from_pretrained(model_id, **load_kwargs)
             if not torch.cuda.is_available():
                 model = model.to('cpu')
         else:

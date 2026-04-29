@@ -23,7 +23,7 @@ _CLIENT = None
 
 def get_client(model: str | None = None):
     global _CLIENT
-    target_model = model or os.environ.get('LOCAL_VLM_MODEL', 'Qwen/Qwen2.5-VL-3B-Instruct')
+    target_model = model or os.environ.get('LOCAL_VLM_MODEL', 'Qwen/Qwen2.5-VL-7B-Instruct')
     if _CLIENT is None or _CLIENT.model != target_model:
         _CLIENT = vlm_client.VLMClient(joint_limits={}, model=target_model)
     return _CLIENT
@@ -31,7 +31,7 @@ def get_client(model: str | None = None):
 
 @app.get('/health')
 def health():
-    model = os.environ.get('LOCAL_VLM_MODEL', 'Qwen/Qwen2.5-VL-3B-Instruct')
+    model = os.environ.get('LOCAL_VLM_MODEL', 'Qwen/Qwen2.5-VL-7B-Instruct')
     return jsonify({'ok': True, 'model': model})
 
 

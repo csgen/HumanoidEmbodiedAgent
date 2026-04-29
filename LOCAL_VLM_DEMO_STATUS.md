@@ -208,6 +208,37 @@
 
 这层的作用类似“低层运动学审查器”，而不是语义行为模板库。
 
+### 9) 本机现在已经可以跑更强的本地 VLM：`Qwen2.5-VL-7B-Instruct` + 4-bit
+
+本轮一个最重要的实质性进展是：
+
+- 已确认本机 `RTX 4060 Laptop 8GB` 可以加载并运行 `Qwen/Qwen2.5-VL-7B-Instruct`
+- 方式是 `4-bit quantization`
+- 已把默认 demo / debug 配置切到：
+  - `LOCAL_VLM_MODEL=Qwen/Qwen2.5-VL-7B-Instruct`
+  - `LOCAL_VLM_LOAD_IN_4BIT=1`
+
+这件事很关键，因为到这里为止，系统的“自然度”瓶颈已经不再只是代码逻辑，而更大程度上是模型本身的多帧理解能力。
+相比继续叠更多规则，直接换更强的 VLM 更符合你的要求：
+
+- 仍然保持 `视频 -> VLM -> primitive 代码 -> 执行`
+- 不引入手势标签模板
+- 不回退到硬编码动作库
+
+### 10) 7B 回归结果
+
+这轮用 `Qwen2.5-VL-7B-Instruct` 做了真实回归：
+
+- `example_video/webcam_20260425_072825.mp4`
+  - 已跑通
+  - 输出不再是单纯 wrist 越界振荡
+  - 当前得到的是更保守的上半身响应：双肘轻微调整 + `idle(...)`
+- `debug_video_samples/pointing__pointing_gesture__emA8oMXjnb4.mp4`
+  - 已跑通
+  - 当前得到的是更短、更克制的单臂指向式上半身响应：`move_arm_ik('right', ...) + idle(...)`
+
+虽然还不能说“已经像成熟宠物机器人一样自然”，但这已经比 3B 时期更接近“短、克制、非夸张、可展示”的方向。
+
 ## 当前离线验证结果
 
 当前更关键的验证目标是：

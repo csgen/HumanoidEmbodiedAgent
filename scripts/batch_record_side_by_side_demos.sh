@@ -11,7 +11,7 @@ SCREEN_RECORD_PY="$REPO_DIR/scripts/screen_record_region.py"
 
 SAMPLES_DIR="${1:-$REPO_DIR/debug_video_samples}"
 OUT_DIR="${2:-$REPO_DIR/artifacts/screen_recordings}"
-MODEL_ID="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
+MODEL_ID="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
 CAPTURE_WIDTH="${CAPTURE_WIDTH:-1880}"
 CAPTURE_HEIGHT="${CAPTURE_HEIGHT:-720}"
 CAPTURE_X="${CAPTURE_X:-0}"

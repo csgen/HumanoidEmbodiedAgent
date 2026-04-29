@@ -8,7 +8,7 @@ FFPLAY_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/ffplay"
 WMCTRL_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/wmctrl"
 
 VIDEO_PATH="${1:-$REPO_DIR/example_video/webcam_20260425_072825.mp4}"
-MODEL_ID="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
+MODEL_ID="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
 VIDEO_TITLE="${VIDEO_TITLE:-Demo Source Video}"
 VIDEO_GEOM="${VIDEO_GEOM:-0,0,0,820,700}"
 WEBOTS_GEOM="${WEBOTS_GEOM:-0,830,0,1050,700}"
