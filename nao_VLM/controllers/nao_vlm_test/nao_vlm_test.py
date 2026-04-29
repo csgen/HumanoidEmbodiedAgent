@@ -369,6 +369,26 @@ class NaoVlmAPI:
                 return 'ABORTED'
         return f'OK oscillate_joint {resolved_name}'
 
+    def set_hand(self, side: str, openness: float, duration: float,
+                 trajectory: str = 'cubic') -> str:
+        if side not in ('left', 'right'):
+            return f'ERROR: invalid side {side!r}'
+        prefix = 'L' if side == 'left' else 'R'
+        motors = list(self.finger_motors.get(prefix, []))
+        if not motors:
+            return f'ERROR: no finger motors for side={side!r}'
+        target = float(np.clip(openness, 0.0, 1.0))
+        starts = [motor.getTargetPosition() for motor in motors]
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        for i in range(1, steps + 1):
+            s = _ease(i / steps, trajectory)
+            for motor, start in zip(motors, starts):
+                motor.setPosition(start + (target - start) * s)
+            if not self._step():
+                return 'ABORTED'
+        return f'OK set_hand {side} openness={target:.2f}'
+
     def hold(self, duration: float) -> str:
         dur = max(self.timestep / 1000.0, float(duration))
         steps = max(1, int(round(dur * 1000.0 / self.timestep)))
@@ -864,16 +884,10 @@ def main():
         'move_joint': vlm_api.move_joint,
         'move_joints': vlm_api.move_joints,
         'move_arm_ik': vlm_api.move_arm_ik,
+        'set_hand': vlm_api.set_hand,
         'oscillate_joint': vlm_api.oscillate_joint,
         'hold': vlm_api.hold,
         'idle': vlm_api.idle,
-        'speak': vlm_api.speak,
-        'navigate_to': vlm_api.navigate_to,
-        # Legacy aliases so existing prompts still work:
-        'look_at': vlm_api.look_at,
-        'move_arm': vlm_api.move_arm,
-        'operate_gripper': vlm_api.operate_gripper,
-        'set_posture': vlm_api.set_posture,
     })
     print(f'[init] sandbox exposes: {executor.registered_names}')
 
@@ -958,22 +972,14 @@ def main():
                         print(f'[VLM] exec FAILED: {result.error}')
                         if result.traceback:
                             print(result.traceback)
-                        decision = fallback.handle_failure(f'exec_failed:{result.error}')
-                        if decision.action == 'replay' and decision.python_code:
-                            replay_result = executor.run(decision.python_code)
-                            print(f'[fallback] replay -> ok={replay_result.ok} error={replay_result.error}')
+                        fallback.handle_failure(f'exec_failed:{result.error}')
                     # Whether exec succeeded or failed, open the post-action
                     # observation window so we see the human's reaction.
                     trigger.mark_action_done()
                 else:
                     print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
-                    decision = fallback.handle_failure(f'call_failed:{rsp.error}')
-                    if decision.action == 'replay' and decision.python_code:
-                        replay_result = executor.run(decision.python_code)
-                        print(f'[fallback] replay -> ok={replay_result.ok} error={replay_result.error}')
-                        trigger.mark_action_done()
-                    else:
-                        trigger.mark_idle()
+                    fallback.handle_failure(f'call_failed:{rsp.error}')
+                    trigger.mark_idle()
 
     # Shutdown
     if buffer is not None:

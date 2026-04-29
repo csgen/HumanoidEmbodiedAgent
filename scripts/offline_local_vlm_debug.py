@@ -58,6 +58,7 @@ def build_executor() -> SandboxExecutor:
         'move_joint': lambda *a, **k: None,
         'move_joints': lambda *a, **k: None,
         'move_arm_ik': lambda *a, **k: None,
+        'set_hand': lambda *a, **k: None,
         'oscillate_joint': lambda *a, **k: None,
         'hold': lambda *a, **k: None,
         'idle': lambda *a, **k: None,

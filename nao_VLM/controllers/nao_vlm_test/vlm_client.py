@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import difflib
 import io
 import json
 import math
@@ -80,6 +81,9 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 
     move_arm_ik(side: str, xyz: list, duration: float)
 
+    set_hand(side: str, openness: float, duration: float,
+             trajectory: str = 'cubic')
+
     oscillate_joint(name: str, center: float, amplitude: float,
                     frequency: float, duration: float, decay: float = 0.0)
 
@@ -87,27 +91,22 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 
     idle(duration: float)
 
-    speak(text: str)
-
-    navigate_to(delta_x: float, delta_y: float, delta_theta: float)
-        # Coarse demo locomotion primitive in Webots Supervisor mode.
-        # Useful for a small pet-like approach or backoff when the human's
-        # body language clearly invites or rejects the robot.
-
 # Demo constraints
 - For this project stage, DO NOT walk and DO NOT use locomotion.
-- Do NOT call `navigate_to(...)`.
 - Prefer upper-body behavior only: head, shoulders, elbows, wrists, hands.
 - Avoid lower-body joints unless absolutely necessary; in this stage they are not needed.
 - Keep motions short, smooth, physically plausible, and pet-like.
 - React naturally rather than mimic exactly; the response should feel socially appropriate.
 - Avoid exaggerated repeated oscillations unless the video strongly supports them.
+- Prefer nonverbal motion only in this demo stage.
 
 # NAO coordinate convention
 - Torso-centred, right-hand frame. Units are METRES.
 - x forward, y LEFT is positive, z up from torso.
-- Neutral arm: right hand ≈ [0.02, -0.10, -0.20]. Typical waving pose:
-  right hand raised to roughly [0.15, -0.15, 0.10].
+- Right arm targets usually use negative y. Left arm targets usually use positive y.
+- Neutral right hand ≈ [0.02, -0.10, -0.20]. Neutral left hand ≈ [0.02, +0.10, -0.20].
+- A natural raised right hand is often around [0.15, -0.15, 0.10].
+- A natural raised left hand is often around [0.15, +0.15, 0.10].
 
 # Joint reference (radian limits)
 {joint_limit_block}
@@ -125,6 +124,7 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 # Composition guidance
 - Prefer short sequences of 2-5 primitive calls.
 - Use `move_joints(...)` when a coordinated upper-body posture is needed.
+- Use `set_hand(...)` for subtle open/close emphasis instead of large arm swings when appropriate.
 - Use `hold(...)` when the response should pause, freeze, or attend.
 - Use `oscillate_joint(...)` only when the observed motion itself appears repeated
   across multiple frames.
@@ -189,8 +189,7 @@ Rules:
 - Keep the robot fully controlled by VLM-generated code.
 - Do not use any intermediate gesture labels.
 - Do not use canned named actions.
-- Use only these primitives: move_joint, move_joints, move_arm_ik, oscillate_joint, hold, idle, speak.
-- Do NOT use navigate_to.
+- Use only these primitives: move_joint, move_joints, move_arm_ik, set_hand, oscillate_joint, hold, idle.
 - Do NOT use lower-body joints.
 - Prefer smooth upper-body motion only: head, shoulders, elbows, wrists, hands.
 - Keep the motion short, natural, pet-like, and physically plausible.
@@ -217,13 +216,12 @@ Use the SAME video frames and produce a BETTER grounded result.
 Rules:
 - Keep the robot fully controlled by VLM-generated code.
 - Do not use intermediate gesture labels or canned named actions.
-- Use only these primitives: move_joint, move_joints, move_arm_ik, oscillate_joint, hold, idle, speak.
-- Do NOT use navigate_to.
+- Use only these primitives: move_joint, move_joints, move_arm_ik, set_hand, oscillate_joint, hold, idle.
 - Do NOT use lower-body joints.
 - The new code must differ materially from the previous code if the previous code was too generic.
 - Avoid a wrist-only oscillation unless the video truly supports it.
-- If the clip is directional, use head orientation and arm orientation to reflect that direction.
-- If the clip is static or prohibitive, prefer hold / stillness over repeated waving.
+- Prefer a short coordinated combination such as head+arm, head+hand, or arm+hand over a single-joint response when the frames support it.
+- If the clip evidence is weak, stay small and calm rather than inventing a dramatic response.
 
 Previous semantic JSON:
 {semantic_json}
@@ -449,11 +447,10 @@ def _build_static_validator(joint_limits: Dict[str, Tuple[float, float]]) -> San
         'move_joint': lambda *a, **k: None,
         'move_joints': lambda *a, **k: None,
         'move_arm_ik': lambda *a, **k: None,
+        'set_hand': lambda *a, **k: None,
         'oscillate_joint': lambda *a, **k: None,
         'hold': lambda *a, **k: None,
         'idle': lambda *a, **k: None,
-        'speak': lambda *a, **k: None,
-        'navigate_to': lambda *a, **k: None,
     })
     executor.set_joint_limits(joint_limits)
     return executor
@@ -466,23 +463,26 @@ def _candidate_has_minimal_structure(semantic: Dict[str, Any], code: str) -> boo
     return bool(calls)
 
 
-def _looks_too_generic_for_clip(semantic: Dict[str, Any], code: str) -> bool:
+def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any], code: str) -> bool:
     if not code:
         return True
     lines = [line.strip() for line in code.splitlines() if line.strip() and not line.strip().startswith('#')]
     calls = _parse_code_calls(code)
     fn_names = [name for name, _ in calls]
     unique_fns = set(fn_names)
+    activity = str((summary or {}).get('activity_level') or 'low').lower()
 
     if len(lines) <= 2 and unique_fns == {'oscillate_joint'}:
         return True
-    if len(lines) <= 2 and unique_fns <= {'move_joint', 'oscillate_joint'}:
+    if len(lines) <= 2 and unique_fns <= {'move_joint', 'oscillate_joint', 'set_hand'}:
         return True
     if len(calls) <= 1:
         return True
     if unique_fns == {'hold'}:
         return True
-    if 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns and len(unique_fns) == 1:
+    if 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns and 'set_hand' not in unique_fns and len(unique_fns) == 1:
+        return True
+    if activity in {'medium', 'high'} and 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns:
         return True
     return False
 
@@ -771,14 +771,203 @@ def _build_selection_prompt(summary: Dict[str, Any], candidates: Sequence[Tuple[
     )
 
 
+class _GeneratedCodeSanitizer(ast.NodeTransformer):
+    def __init__(self, joint_limits: Dict[str, Tuple[float, float]]) -> None:
+        self.joint_limits = dict(joint_limits or {})
+        self.normalized_joint_names = {
+            ''.join(ch for ch in name if ch.isalnum()).lower(): name
+            for name in self.joint_limits
+        }
+
+    def _literal(self, node):
+        try:
+            return ast.literal_eval(node)
+        except Exception:
+            return None
+
+    def _find_keyword(self, node: ast.Call, keyword_name: str):
+        for kw in node.keywords:
+            if kw.arg == keyword_name:
+                return kw
+        return None
+
+    def _canonical_joint_name(self, raw_name: Any) -> Any:
+        if not isinstance(raw_name, str):
+            return raw_name
+        if raw_name in self.joint_limits:
+            return raw_name
+        normalized = ''.join(ch for ch in raw_name if ch.isalnum()).lower()
+        alias_map = {
+            'head': 'HeadYaw',
+            'neck': 'HeadYaw',
+            'headyaw': 'HeadYaw',
+            'neckyaw': 'HeadYaw',
+            'headpitch': 'HeadPitch',
+            'neckpitch': 'HeadPitch',
+        }
+        if normalized in alias_map:
+            return alias_map[normalized]
+        if normalized in self.normalized_joint_names:
+            return self.normalized_joint_names[normalized]
+        matches = difflib.get_close_matches(normalized, list(self.normalized_joint_names.keys()), n=1, cutoff=0.72)
+        if matches:
+            return self.normalized_joint_names[matches[0]]
+        return raw_name
+
+    def _clip_joint_angle(self, joint_name: Any, angle: Any) -> Any:
+        if not isinstance(joint_name, str) or not isinstance(angle, (int, float)):
+            return angle
+        limits = self.joint_limits.get(joint_name)
+        if limits is None or limits[0] == limits[1]:
+            return angle
+        return float(max(limits[0], min(limits[1], float(angle))))
+
+    def _sanitize_oscillation(self, joint_name: Any, center: Any, amplitude: Any):
+        if not isinstance(joint_name, str) or not isinstance(center, (int, float)) or not isinstance(amplitude, (int, float)):
+            return center, amplitude
+        limits = self.joint_limits.get(joint_name)
+        if limits is None or limits[0] == limits[1]:
+            return center, amplitude
+        max_amp = max(0.0, min(abs(float(amplitude)), 0.7, (limits[1] - limits[0]) * 0.45))
+        min_center = limits[0] + max_amp
+        max_center = limits[1] - max_amp
+        if min_center > max_center:
+            mid = 0.5 * (limits[0] + limits[1])
+            return mid, 0.0
+        safe_center = float(max(min_center, min(max_center, float(center))))
+        signed_amp = max_amp if float(amplitude) >= 0 else -max_amp
+        return safe_center, signed_amp
+
+    def _sanitize_hand_openness(self, openness: Any) -> Any:
+        if not isinstance(openness, (int, float)):
+            return openness
+        return float(max(0.0, min(1.0, float(openness))))
+
+    def _sanitize_arm_target(self, side: Any, xyz: Any):
+        if not isinstance(side, str) or not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
+            return xyz
+        try:
+            x, y, z = [float(v) for v in xyz]
+        except Exception:
+            return xyz
+        x = max(0.05, min(0.24, x))
+        lateral = max(0.05, min(0.24, abs(y)))
+        y = lateral if side == 'left' else -lateral
+        z = max(-0.24, min(0.16, z))
+        return [round(x, 4), round(y, 4), round(z, 4)]
+
+    def visit_Call(self, node: ast.Call):
+        self.generic_visit(node)
+        fn_name = None
+        if isinstance(node.func, ast.Name):
+            fn_name = node.func.id
+        elif isinstance(node.func, ast.Attribute):
+            fn_name = node.func.attr
+
+        if fn_name == 'move_joint':
+            if len(node.args) >= 1:
+                raw_name = self._literal(node.args[0])
+                canonical = self._canonical_joint_name(raw_name)
+                if isinstance(canonical, str):
+                    node.args[0] = ast.Constant(value=canonical)
+            else:
+                kw = self._find_keyword(node, 'name')
+                if kw is not None:
+                    canonical = self._canonical_joint_name(self._literal(kw.value))
+                    if isinstance(canonical, str):
+                        kw.value = ast.Constant(value=canonical)
+            joint_name = self._literal(node.args[0]) if len(node.args) >= 1 else self._literal(self._find_keyword(node, 'name').value) if self._find_keyword(node, 'name') else None
+            if len(node.args) >= 2:
+                safe_angle = self._clip_joint_angle(joint_name, self._literal(node.args[1]))
+                if isinstance(safe_angle, (int, float)):
+                    node.args[1] = ast.Constant(value=float(safe_angle))
+
+        if fn_name == 'move_joints' and len(node.args) >= 1 and isinstance(node.args[0], ast.Dict):
+            new_keys = []
+            new_values = []
+            for key_node, value_node in zip(node.args[0].keys, node.args[0].values):
+                raw_name = self._literal(key_node)
+                canonical = self._canonical_joint_name(raw_name)
+                safe_angle = self._clip_joint_angle(canonical, self._literal(value_node))
+                new_keys.append(ast.Constant(value=canonical) if isinstance(canonical, str) else key_node)
+                new_values.append(ast.Constant(value=float(safe_angle)) if isinstance(safe_angle, (int, float)) else value_node)
+            node.args[0].keys = new_keys
+            node.args[0].values = new_values
+
+        if fn_name == 'move_arm_ik':
+            side = self._literal(node.args[0]) if len(node.args) >= 1 else self._literal(self._find_keyword(node, 'side').value) if self._find_keyword(node, 'side') else None
+            if len(node.args) >= 2:
+                safe_xyz = self._sanitize_arm_target(side, self._literal(node.args[1]))
+                if isinstance(safe_xyz, list):
+                    node.args[1] = ast.List(elts=[ast.Constant(value=v) for v in safe_xyz], ctx=ast.Load())
+            else:
+                kw = self._find_keyword(node, 'xyz')
+                safe_xyz = self._sanitize_arm_target(side, self._literal(kw.value) if kw is not None else None)
+                if kw is not None and isinstance(safe_xyz, list):
+                    kw.value = ast.List(elts=[ast.Constant(value=v) for v in safe_xyz], ctx=ast.Load())
+
+        if fn_name == 'set_hand':
+            if len(node.args) >= 2:
+                safe_openness = self._sanitize_hand_openness(self._literal(node.args[1]))
+                if isinstance(safe_openness, (int, float)):
+                    node.args[1] = ast.Constant(value=float(safe_openness))
+            else:
+                kw = self._find_keyword(node, 'openness')
+                safe_openness = self._sanitize_hand_openness(self._literal(kw.value) if kw is not None else None)
+                if kw is not None and isinstance(safe_openness, (int, float)):
+                    kw.value = ast.Constant(value=float(safe_openness))
+
+        if fn_name == 'oscillate_joint':
+            if len(node.args) >= 1:
+                raw_name = self._literal(node.args[0])
+                canonical = self._canonical_joint_name(raw_name)
+                if isinstance(canonical, str):
+                    node.args[0] = ast.Constant(value=canonical)
+            else:
+                kw = self._find_keyword(node, 'name')
+                canonical = self._canonical_joint_name(self._literal(kw.value) if kw is not None else None)
+                if kw is not None and isinstance(canonical, str):
+                    kw.value = ast.Constant(value=canonical)
+            joint_name = self._literal(node.args[0]) if len(node.args) >= 1 else self._literal(self._find_keyword(node, 'name').value) if self._find_keyword(node, 'name') else None
+            center_node = node.args[1] if len(node.args) >= 2 else self._find_keyword(node, 'center').value if self._find_keyword(node, 'center') else None
+            amplitude_node = node.args[2] if len(node.args) >= 3 else self._find_keyword(node, 'amplitude').value if self._find_keyword(node, 'amplitude') else None
+            safe_center, safe_amplitude = self._sanitize_oscillation(joint_name, self._literal(center_node), self._literal(amplitude_node))
+            if len(node.args) >= 2 and isinstance(safe_center, (int, float)):
+                node.args[1] = ast.Constant(value=float(safe_center))
+            else:
+                kw = self._find_keyword(node, 'center')
+                if kw is not None and isinstance(safe_center, (int, float)):
+                    kw.value = ast.Constant(value=float(safe_center))
+            if len(node.args) >= 3 and isinstance(safe_amplitude, (int, float)):
+                node.args[2] = ast.Constant(value=float(safe_amplitude))
+            else:
+                kw = self._find_keyword(node, 'amplitude')
+                if kw is not None and isinstance(safe_amplitude, (int, float)):
+                    kw.value = ast.Constant(value=float(safe_amplitude))
+
+        return node
+
+
+def _sanitize_generated_code(code: str, joint_limits: Dict[str, Tuple[float, float]]) -> str:
+    if not code.strip():
+        return code
+    try:
+        tree = ast.parse(code)
+        tree = _GeneratedCodeSanitizer(joint_limits).visit(tree)
+        ast.fix_missing_locations(tree)
+        return textwrap.dedent(ast.unparse(tree)).strip()
+    except Exception:
+        return code
+
+
 def _normalize_generated_code(code: str) -> str:
     if not code:
         return code
 
     normalized = textwrap.dedent(code).strip()
 
-    if normalized.startswith('{') and normalized.endswith('}') and 'oscillate_joint' in normalized:
-        extracted_calls = re.findall(r'"([^"]*(?:move_joint|move_joints|move_arm_ik|oscillate_joint|hold|idle|speak)[^"]*)"', normalized)
+    if normalized.startswith('{') and normalized.endswith('}') and any(token in normalized for token in ('oscillate_joint', 'move_arm_ik', 'set_hand', 'move_joint', 'move_joints')):
+        extracted_calls = re.findall(r'"([^"]*(?:move_joint|move_joints|move_arm_ik|set_hand|oscillate_joint|hold|idle)[^"]*)"', normalized)
         if extracted_calls:
             normalized = '\n'.join(call.strip() for call in extracted_calls if call.strip())
 
@@ -855,6 +1044,27 @@ def _normalize_generated_code(code: str) -> str:
                 value = -abs(value)
             return f"{quote}{name}{quote}: {value:.4f}"
         normalized = pattern.sub(_fix, normalized)
+
+    normalized = re.sub(
+        r"oscillate_joint\(\s*name\s*=\s*['\"]RWristYaw['\"]\s*,\s*center\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        lambda m: f"oscillate_joint(name='RWristYaw', center={max(-1.2, min(1.2, float(m.group(1)))):.4f}",
+        normalized,
+    )
+    normalized = re.sub(
+        r"oscillate_joint\(\s*name\s*=\s*['\"]LWristYaw['\"]\s*,\s*center\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        lambda m: f"oscillate_joint(name='LWristYaw', center={max(-1.2, min(1.2, float(m.group(1)))):.4f}",
+        normalized,
+    )
+    normalized = re.sub(
+        r"oscillate_joint\(\s*['\"]RWristYaw['\"]\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        lambda m: f"oscillate_joint('RWristYaw', {max(-1.2, min(1.2, float(m.group(1)))):.4f}",
+        normalized,
+    )
+    normalized = re.sub(
+        r"oscillate_joint\(\s*['\"]LWristYaw['\"]\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)",
+        lambda m: f"oscillate_joint('LWristYaw', {max(-1.2, min(1.2, float(m.group(1)))):.4f}",
+        normalized,
+    )
 
     lines = [line.rstrip() for line in normalized.splitlines()]
     return '\n'.join(lines).strip()
@@ -938,7 +1148,7 @@ class VLMClient:
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
 
         semantic, code = parse_vlm_output(raw)
-        code = _normalize_generated_code(code)
+        code = _sanitize_generated_code(_normalize_generated_code(code), self.joint_limits)
         ok = bool(code) and bool(semantic)
         return VLMResponse(
             semantic_context=semantic,
@@ -979,7 +1189,7 @@ class VLMClient:
 
             for raw in raw_candidates:
                 semantic, code = parse_vlm_output(raw)
-                code = _normalize_generated_code(code)
+                code = _sanitize_generated_code(_normalize_generated_code(code), self.joint_limits)
                 if not _candidate_has_minimal_structure(semantic, code):
                     if config.LOCAL_VLM_DEBUG:
                         print(f'[VLMClient][local] candidate rejected: parse/min-structure failed semantic={semantic}')
@@ -994,7 +1204,7 @@ class VLMClient:
             if not valid_candidates:
                 seed_raw = raw_candidates[0] if raw_candidates else ''
                 seed_semantic, seed_code = parse_vlm_output(seed_raw)
-                seed_code = _normalize_generated_code(seed_code)
+                seed_code = _sanitize_generated_code(_normalize_generated_code(seed_code), self.joint_limits)
                 parse_repair_prompt = _build_repair_prompt_with_summary(
                     frames_b64,
                     seed_semantic,
@@ -1006,7 +1216,7 @@ class VLMClient:
                 else:
                     repaired_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
                 repaired_semantic, repaired_code = parse_vlm_output(repaired_raw)
-                repaired_code = _normalize_generated_code(repaired_code)
+                repaired_code = _sanitize_generated_code(_normalize_generated_code(repaired_code), self.joint_limits)
                 repaired_validation = self.static_validator.validate(repaired_code)
                 if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
                     return VLMResponse(
@@ -1036,7 +1246,7 @@ class VLMClient:
                 else:
                     best_semantic, best_code, best_raw = pool[0]
 
-            if best_code and _looks_too_generic_for_clip(best_semantic, best_code):
+            if best_code and _looks_too_generic_for_clip(summary, best_semantic, best_code):
                 refinement_prompt = _build_refinement_prompt_with_summary(
                     frames_b64,
                     best_semantic,
@@ -1048,7 +1258,7 @@ class VLMClient:
                 else:
                     refined_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, refinement_prompt)
                 refined_semantic, refined_code = parse_vlm_output(refined_raw)
-                refined_code = _normalize_generated_code(refined_code)
+                refined_code = _sanitize_generated_code(_normalize_generated_code(refined_code), self.joint_limits)
                 refined_validation = self.static_validator.validate(refined_code)
                 if config.LOCAL_VLM_DEBUG:
                     print(f'[VLMClient][local] refinement valid={refined_validation.ok} semantic={refined_semantic}')
@@ -1069,7 +1279,7 @@ class VLMClient:
                 else:
                     repaired_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
                 repaired_semantic, repaired_code = parse_vlm_output(repaired_raw)
-                repaired_code = _normalize_generated_code(repaired_code)
+                repaired_code = _sanitize_generated_code(_normalize_generated_code(repaired_code), self.joint_limits)
                 repaired_validation = self.static_validator.validate(repaired_code)
                 if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
                     best_semantic, best_code, best_raw = repaired_semantic, repaired_code, repaired_raw
@@ -1098,7 +1308,7 @@ class VLMClient:
                     else:
                         raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=False)
                     semantic, code = parse_vlm_output(raw)
-                    code = _normalize_generated_code(code)
+                    code = _sanitize_generated_code(_normalize_generated_code(code), self.joint_limits)
                     validation = self.static_validator.validate(code)
                     if (not _candidate_has_minimal_structure(semantic, code)) or (not validation.ok):
                         repair_prompt = _build_repair_prompt_with_summary(frames_b64, semantic, code, 'cpu_fallback_repair')
@@ -1107,7 +1317,7 @@ class VLMClient:
                         else:
                             raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
                         semantic, code = parse_vlm_output(raw)
-                        code = _normalize_generated_code(code)
+                        code = _sanitize_generated_code(_normalize_generated_code(code), self.joint_limits)
                         validation = self.static_validator.validate(code)
                     ok = bool(code) and bool(semantic) and validation.ok
                     return VLMResponse(
@@ -1161,7 +1371,7 @@ class VLMClient:
                 raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
 
             semantic, code = parse_vlm_output(raw)
-            code = _normalize_generated_code(code)
+            code = _sanitize_generated_code(_normalize_generated_code(code), self.joint_limits)
             validation = self.static_validator.validate(code)
             ok = bool(code) and bool(semantic) and validation.ok
             return VLMResponse(

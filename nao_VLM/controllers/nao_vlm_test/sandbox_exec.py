@@ -188,6 +188,14 @@ class SandboxExecutor:
                     if radius > 0.6:
                         return ValidationResult(False, error=f'ik_target_too_far: {xyz}')
 
+            if fn_name == 'set_hand':
+                side = self._literal(node.args[0]) if len(node.args) >= 1 else self._keyword_literal(node, 'side')
+                openness = self._literal(node.args[1]) if len(node.args) >= 2 else self._keyword_literal(node, 'openness')
+                if isinstance(side, str) and side not in {'left', 'right'}:
+                    return ValidationResult(False, error=f'invalid_hand_side: {side}')
+                if isinstance(openness, (int, float)) and not (0.0 <= float(openness) <= 1.0):
+                    return ValidationResult(False, error=f'hand_openness_out_of_range: {openness}')
+
         if oscillation_calls >= 4:
             return ValidationResult(False, error='too_many_oscillations')
 
