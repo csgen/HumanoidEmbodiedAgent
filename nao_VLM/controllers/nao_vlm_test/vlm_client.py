@@ -12,9 +12,11 @@ program from the observed video frames.
 """
 from __future__ import annotations
 
+import ast
 import base64
 import io
 import json
+import math
 import re
 import textwrap
 import time
@@ -22,6 +24,7 @@ from dataclasses import dataclass
 from threading import Lock
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import requests
 
 try:
@@ -30,6 +33,7 @@ except Exception:
     OpenAI = None
 
 import config
+from sandbox_exec import SandboxExecutor
 
 
 _BASE_SYSTEM_PROMPT = """\
@@ -90,6 +94,15 @@ or "greet()" function. You must COMPOSE motion from these primitives:
         # Useful for a small pet-like approach or backoff when the human's
         # body language clearly invites or rejects the robot.
 
+# Demo constraints
+- For this project stage, DO NOT walk and DO NOT use locomotion.
+- Do NOT call `navigate_to(...)`.
+- Prefer upper-body behavior only: head, shoulders, elbows, wrists, hands.
+- Avoid lower-body joints unless absolutely necessary; in this stage they are not needed.
+- Keep motions short, smooth, physically plausible, and pet-like.
+- React naturally rather than mimic exactly; the response should feel socially appropriate.
+- Avoid exaggerated repeated oscillations unless the video strongly supports them.
+
 # NAO coordinate convention
 - Torso-centred, right-hand frame. Units are METRES.
 - x forward, y LEFT is positive, z up from torso.
@@ -98,6 +111,132 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 
 # Joint reference (radian limits)
 {joint_limit_block}
+
+# Diversity and grounding requirements
+- Different input clips should generally produce DIFFERENT control code.
+- Reusing the same wrist-only oscillation for unrelated clips is incorrect.
+- Base side choice, dominant joints, tempo, and hold-vs-oscillation decisions on
+  the actual frame sequence.
+- If the human motion is mostly static, prefer orienting and holding instead of
+  repetitive oscillation.
+- If the motion is laterally directed, head yaw / shoulder roll / elbow yaw may
+  dominate more than head pitch.
+- If the motion is vertically directed, head pitch / shoulder pitch may matter
+  more than head yaw.
+- If the clip shows bilateral openness or approval, a symmetric two-arm response
+  is acceptable.
+
+# Style examples (for guidance only — do NOT copy blindly)
+
+Example A — friendly greeting near the robot:
+```json
+{{
+  "intent": "the human greets the robot with a friendly wave",
+  "social_distance": "close",
+  "affect": "friendly",
+  "confidence": 0.88,
+  "motion_dynamics": "oscillatory"
+}}
+```
+```python
+move_joints({{
+    'HeadPitch': -0.08,
+    'RShoulderPitch': 0.85,
+    'RShoulderRoll': -0.18,
+    'RElbowYaw': 1.10,
+    'RElbowRoll': 0.70,
+    'RWristYaw': 0.05,
+}}, duration=0.60, trajectory='min_jerk')
+oscillate_joint('RWristYaw', center=0.05, amplitude=0.22, frequency=1.3, duration=0.90, decay=1.0)
+move_joints({{
+    'HeadPitch': 0.0,
+    'RShoulderPitch': 1.50,
+    'RShoulderRoll': -0.15,
+    'RElbowYaw': 1.20,
+    'RElbowRoll': 0.50,
+    'RWristYaw': 0.0,
+}}, duration=0.55, trajectory='min_jerk')
+```
+
+Example B — follow a pointing cue with curiosity:
+```json
+{{
+  "intent": "the human indicates a direction or object",
+  "social_distance": "close",
+  "affect": "curious",
+  "confidence": 0.84,
+  "motion_dynamics": "static"
+}}
+```
+```python
+move_joints({{
+    'HeadYaw': 0.35,
+    'HeadPitch': -0.05,
+    'RShoulderPitch': 1.00,
+    'RShoulderRoll': -0.10,
+    'RElbowYaw': 1.00,
+    'RElbowRoll': 0.45,
+}}, duration=0.55, trajectory='min_jerk')
+hold(0.45)
+move_joints({{
+    'HeadYaw': 0.0,
+    'HeadPitch': 0.0,
+    'RShoulderPitch': 1.50,
+    'RShoulderRoll': -0.15,
+    'RElbowYaw': 1.20,
+    'RElbowRoll': 0.50,
+}}, duration=0.50, trajectory='min_jerk')
+```
+
+Example C — respectful stop response:
+```json
+{{
+  "intent": "the human asks the robot to stop or pause",
+  "social_distance": "close",
+  "affect": "neutral",
+  "confidence": 0.90,
+  "motion_dynamics": "static"
+}}
+```
+```python
+move_joints({{
+    'HeadPitch': 0.10,
+    'LShoulderPitch': 1.55,
+    'RShoulderPitch': 1.55,
+    'LElbowRoll': -0.45,
+    'RElbowRoll': 0.45,
+}}, duration=0.35, trajectory='min_jerk')
+hold(0.90)
+```
+
+Example D — positive acknowledgment like a pet:
+```json
+{{
+  "intent": "the human shows approval or encouragement",
+  "social_distance": "close",
+  "affect": "happy",
+  "confidence": 0.86,
+  "motion_dynamics": "raising"
+}}
+```
+```python
+move_joints({{
+    'HeadPitch': -0.06,
+    'LShoulderPitch': 1.18,
+    'RShoulderPitch': 1.18,
+    'LShoulderRoll': 0.20,
+    'RShoulderRoll': -0.20,
+}}, duration=0.40, trajectory='min_jerk')
+move_joint('HeadPitch', 0.02, duration=0.18, trajectory='min_jerk')
+move_joint('HeadPitch', -0.05, duration=0.18, trajectory='min_jerk')
+move_joints({{
+    'HeadPitch': 0.0,
+    'LShoulderPitch': 1.50,
+    'RShoulderPitch': 1.50,
+    'LShoulderRoll': 0.15,
+    'RShoulderRoll': -0.15,
+}}, duration=0.45, trajectory='min_jerk')
+```
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
@@ -143,8 +282,70 @@ _LOCAL_USER_PROMPT = (
     "primitives and joint movements. Use the exact primitive names provided in "
     "the system instructions. Do not prefix calls with objects like `nao.` or "
     "`robot.`. Output only the required fenced JSON block and fenced Python "
-    "block."
+    "block. Do not use lower-body motion or walking in this demo stage. Prefer "
+    "head, arm, wrist, and hand motion only. Do not default to the same motion "
+    "pattern for every clip. Infer laterality, tempo, activity level, and "
+    "dominant direction from the frames, then let those observations change the "
+    "generated control program."
 )
+
+_LOCAL_REPAIR_PROMPT_TEMPLATE = """The previous robot-control program was not acceptable.
+
+Use the SAME video frames and produce a corrected result.
+
+Rules:
+- Keep the robot fully controlled by VLM-generated code.
+- Do not use any intermediate gesture labels.
+- Do not use canned named actions.
+- Use only these primitives: move_joint, move_joints, move_arm_ik, oscillate_joint, hold, idle, speak.
+- Do NOT use navigate_to.
+- Do NOT use lower-body joints.
+- Prefer smooth upper-body motion only: head, shoulders, elbows, wrists, hands.
+- Keep the motion short, natural, pet-like, and physically plausible.
+- Use exact primitive names with no object prefixes.
+
+Previous semantic JSON:
+{semantic_json}
+
+Previous Python code:
+```python
+{python_code}
+```
+
+Problem to fix:
+{error_text}
+
+Return ONLY a corrected JSON block and corrected Python block.
+"""
+
+_LOCAL_REFINEMENT_PROMPT_TEMPLATE = """The previous candidate is too generic or not well grounded in the specific clip.
+
+Use the SAME video frames and produce a BETTER grounded result.
+
+Rules:
+- Keep the robot fully controlled by VLM-generated code.
+- Do not use intermediate gesture labels or canned named actions.
+- Use only these primitives: move_joint, move_joints, move_arm_ik, oscillate_joint, hold, idle, speak.
+- Do NOT use navigate_to.
+- Do NOT use lower-body joints.
+- The new code must differ materially from the previous code if the previous code was too generic.
+- Avoid a wrist-only oscillation unless the video truly supports it.
+- If the clip is directional, use head orientation and arm orientation to reflect that direction.
+- If the clip is static or prohibitive, prefer hold / stillness over repeated waving.
+
+Previous semantic JSON:
+{semantic_json}
+
+Previous Python code:
+```python
+{python_code}
+```
+
+Reason for refinement:
+{error_text}
+
+Return ONLY a corrected JSON block and corrected Python block.
+"""
 
 _LOCAL_MODEL_LOCK = Lock()
 _LOCAL_MODEL_ID: Optional[str] = None
@@ -193,6 +394,297 @@ def _decode_frames_to_pil(frames_b64: Sequence[str]):
         image = Image.open(io.BytesIO(payload)).convert('RGB')
         images.append(image)
     return images
+
+
+def _infer_visual_motion_summary(frames_b64: Sequence[str]) -> Dict[str, Any]:
+    if len(frames_b64) < 2:
+        return {
+            'frame_count': len(frames_b64),
+            'motion_energy': 0.0,
+            'dominant_axis': 'static',
+            'lateral_bias': 'center',
+            'vertical_bias': 'center',
+            'activity_level': 'low',
+        }
+
+    frames = []
+    for img_b64 in frames_b64:
+        payload = base64.b64decode(img_b64)
+        arr = np.frombuffer(payload, dtype=np.uint8)
+        try:
+            import cv2
+            img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        except Exception:
+            img = None
+        if img is not None:
+            frames.append(img.astype(np.float32) / 255.0)
+
+    if len(frames) < 2:
+        return {
+            'frame_count': len(frames_b64),
+            'motion_energy': 0.0,
+            'dominant_axis': 'static',
+            'lateral_bias': 'center',
+            'vertical_bias': 'center',
+            'activity_level': 'low',
+        }
+
+    total_energy = 0.0
+    centroid_dx = 0.0
+    centroid_dy = 0.0
+    centroid_samples = 0
+
+    prev_cx = None
+    prev_cy = None
+    for prev, cur in zip(frames[:-1], frames[1:]):
+        diff = np.abs(cur - prev)
+        energy = float(diff.mean())
+        total_energy += energy
+
+        h, w = diff.shape[:2]
+        ys, xs = np.mgrid[0:h, 0:w]
+        weight = diff + 1e-6
+        mass = float(weight.sum())
+        cx = float((xs * weight).sum() / mass) / max(1.0, float(w - 1))
+        cy = float((ys * weight).sum() / mass) / max(1.0, float(h - 1))
+
+        if prev_cx is not None and prev_cy is not None:
+            centroid_dx += cx - prev_cx
+            centroid_dy += cy - prev_cy
+            centroid_samples += 1
+        prev_cx, prev_cy = cx, cy
+
+    mean_energy = total_energy / max(1, len(frames) - 1)
+    mean_dx = centroid_dx / max(1, centroid_samples)
+    mean_dy = centroid_dy / max(1, centroid_samples)
+
+    abs_dx = abs(mean_dx)
+    abs_dy = abs(mean_dy)
+    if mean_energy < 0.015:
+        dominant_axis = 'static'
+    elif abs_dx > abs_dy * 1.25:
+        dominant_axis = 'horizontal'
+    elif abs_dy > abs_dx * 1.25:
+        dominant_axis = 'vertical'
+    else:
+        dominant_axis = 'mixed'
+
+    if mean_dx > 0.02:
+        lateral_bias = 'rightward_in_image'
+    elif mean_dx < -0.02:
+        lateral_bias = 'leftward_in_image'
+    else:
+        lateral_bias = 'center'
+
+    if mean_dy > 0.02:
+        vertical_bias = 'downward_in_image'
+    elif mean_dy < -0.02:
+        vertical_bias = 'upward_in_image'
+    else:
+        vertical_bias = 'center'
+
+    if mean_energy < 0.02:
+        activity = 'low'
+    elif mean_energy < 0.05:
+        activity = 'medium'
+    else:
+        activity = 'high'
+
+    return {
+        'frame_count': len(frames_b64),
+        'motion_energy': round(mean_energy, 4),
+        'dominant_axis': dominant_axis,
+        'lateral_bias': lateral_bias,
+        'vertical_bias': vertical_bias,
+        'activity_level': activity,
+    }
+
+
+def _build_motion_prior_text(summary: Dict[str, Any]) -> str:
+    dominant_axis = str(summary.get('dominant_axis') or 'static')
+    lateral_bias = str(summary.get('lateral_bias') or 'center')
+    vertical_bias = str(summary.get('vertical_bias') or 'center')
+    activity = str(summary.get('activity_level') or 'low')
+    energy = float(summary.get('motion_energy') or 0.0)
+
+    lines = [
+        '# Primitive-level motion prior derived from the clip',
+        '- This prior is low-level and kinematic; use it to ground primitive choice.',
+    ]
+
+    if dominant_axis == 'horizontal':
+        lines.append('- Motion is mainly lateral: prefer HeadYaw / ShoulderRoll / ElbowYaw orientation over wrist-only waving.')
+    elif dominant_axis == 'vertical':
+        lines.append('- Motion is mainly vertical: prefer HeadPitch / ShoulderPitch changes and brief holds over lateral wrist oscillation.')
+    elif dominant_axis == 'mixed':
+        lines.append('- Motion is mixed and relatively energetic: a short composed response with arm lift plus recovery is acceptable.')
+    else:
+        lines.append('- Motion is weak or static: prefer stillness, small orientation, and hold instead of repeated oscillation.')
+
+    if lateral_bias == 'leftward_in_image':
+        lines.append('- The motion drifts left in the image: a lateral orienting response is more grounded than a symmetric response.')
+    elif lateral_bias == 'rightward_in_image':
+        lines.append('- The motion drifts right in the image: a lateral orienting response is more grounded than a symmetric response.')
+
+    if vertical_bias == 'upward_in_image':
+        lines.append('- Upward drift is present: lifting attention or slightly raising the upper body chain can be natural.')
+    elif vertical_bias == 'downward_in_image':
+        lines.append('- Downward drift is present: a mild lowering or settling response can be natural.')
+
+    if activity == 'high':
+        lines.append('- Activity is high: one brief dynamic phase is acceptable, but still return smoothly to a calm posture.')
+    elif activity == 'medium':
+        lines.append('- Activity is medium: use moderate motion; avoid long repetitive oscillations.')
+    else:
+        lines.append('- Activity is low: keep the response short and restrained.')
+
+    if energy < 0.02:
+        lines.append('- Because motion energy is low, holding posture is often more grounded than repeated rhythmic movement.')
+
+    return '\n'.join(lines)
+
+
+def _build_local_user_prompt(frames_b64: Sequence[str]) -> str:
+    summary = _infer_visual_motion_summary(frames_b64)
+    return (
+        _LOCAL_USER_PROMPT
+        + "\n\n# Cheap motion summary extracted from the frame sequence\n"
+        + json.dumps(summary, ensure_ascii=False, indent=2)
+        + "\nUse this only as weak grounding. The frames remain the main evidence.\n\n"
+        + _build_motion_prior_text(summary)
+    )
+
+
+def _parse_code_calls(code: str) -> List[Tuple[str, int]]:
+    try:
+        tree = ast.parse(code)
+    except Exception:
+        return []
+    calls: List[Tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            calls.append((node.func.id, getattr(node, 'lineno', 0)))
+        elif isinstance(node.func, ast.Attribute):
+            calls.append((node.func.attr, getattr(node, 'lineno', 0)))
+    return calls
+
+
+def _build_static_validator(joint_limits: Dict[str, Tuple[float, float]]) -> SandboxExecutor:
+    executor = SandboxExecutor()
+    executor.register_many({
+        'move_joint': lambda *a, **k: None,
+        'move_joints': lambda *a, **k: None,
+        'move_arm_ik': lambda *a, **k: None,
+        'oscillate_joint': lambda *a, **k: None,
+        'hold': lambda *a, **k: None,
+        'idle': lambda *a, **k: None,
+        'speak': lambda *a, **k: None,
+        'navigate_to': lambda *a, **k: None,
+    })
+    executor.set_joint_limits(joint_limits)
+    return executor
+
+
+def _score_candidate_response(semantic: Dict[str, Any], code: str, summary: Optional[Dict[str, Any]] = None) -> float:
+    if not semantic or not code:
+        return -1e9
+
+    calls = _parse_code_calls(code)
+    if not calls:
+        return -1e9
+
+    score = 0.0
+    fn_names = [name for name, _ in calls]
+    unique_fns = set(fn_names)
+
+    score += 2.0 * min(len(unique_fns), 4)
+    score += 0.6 * min(len(calls), 6)
+
+    if 'move_joints' in unique_fns:
+        score += 2.0
+    if 'move_joint' in unique_fns:
+        score += 1.0
+    if 'hold' in unique_fns:
+        score += 0.8
+    if 'oscillate_joint' in unique_fns:
+        score += 0.6
+    if 'move_arm_ik' in unique_fns:
+        score += 1.0
+
+    if 'navigate_to' in code:
+        score -= 20.0
+
+    lower_markers = ('Hip', 'Knee', 'Ankle')
+    if any(marker in code for marker in lower_markers):
+        score -= 20.0
+
+    if 'RWristYaw' in code and len(unique_fns) <= 2 and 'move_joints' not in unique_fns:
+        score -= 3.0
+
+    if code.count('oscillate_joint') >= 3:
+        score -= 2.0
+
+    intent = str(semantic.get('intent') or '').strip()
+    affect = str(semantic.get('affect') or '').strip()
+    dynamics = str(semantic.get('motion_dynamics') or '').strip()
+    social = str(semantic.get('social_distance') or '').strip()
+
+    if intent:
+        score += 1.2
+    if affect:
+        score += 0.6
+    if dynamics:
+        score += 0.6
+    if social:
+        score += 0.4
+
+    summary = summary or {}
+    dominant_axis = str(summary.get('dominant_axis') or '')
+    activity = str(summary.get('activity_level') or '')
+
+    if dominant_axis == 'horizontal':
+        if any(key in code for key in ('HeadYaw', 'ShoulderRoll', 'ElbowYaw')):
+            score += 2.5
+        if 'RWristYaw' in code and 'HeadYaw' not in code and 'ShoulderRoll' not in code and 'ElbowYaw' not in code:
+            score -= 2.5
+    elif dominant_axis == 'vertical':
+        if any(key in code for key in ('HeadPitch', 'ShoulderPitch', 'hold(')):
+            score += 2.5
+        if 'RWristYaw' in code and 'HeadPitch' not in code and 'ShoulderPitch' not in code:
+            score -= 2.5
+    elif dominant_axis == 'static':
+        if 'hold(' in code:
+            score += 2.5
+        if code.count('oscillate_joint') >= 1:
+            score -= 2.0
+
+    if activity in {'medium', 'low'} and code.count('oscillate_joint') >= 2:
+        score -= 1.5
+
+    return score
+
+
+def _looks_too_generic_for_clip(semantic: Dict[str, Any], code: str) -> bool:
+    if not code:
+        return True
+    lines = [line.strip() for line in code.splitlines() if line.strip() and not line.strip().startswith('#')]
+    calls = _parse_code_calls(code)
+    fn_names = [name for name, _ in calls]
+    unique_fns = set(fn_names)
+    intent = str(semantic.get('intent') or '').lower()
+    dynamics = str(semantic.get('motion_dynamics') or '').lower()
+
+    if len(lines) <= 2 and unique_fns == {'oscillate_joint'} and 'RWristYaw' in code:
+        return True
+    if len(lines) <= 2 and 'point' in intent and 'HeadYaw' not in code and 'ShoulderRoll' not in code and 'ElbowYaw' not in code:
+        return True
+    if len(lines) <= 2 and ('stop' in intent or dynamics == 'static') and 'hold(' not in code:
+        return True
+    if len(lines) <= 2 and any(word in intent for word in ('thumb', 'approve', 'approval', 'yes')) and 'HeadPitch' not in code:
+        return True
+    return False
 
 
 def _pick_backend(api_key: Optional[str]) -> str:
@@ -269,7 +761,7 @@ def _load_local_model(model_id: str):
         return processor, model, kind
 
 
-def _qwen_multi_image_generate(processor, model, images, system_prompt: str) -> str:
+def _qwen_multi_image_generate(processor, model, images, system_prompt: str, user_prompt: str, do_sample: bool = False) -> str:
     messages = [{
         'role': 'system',
         'content': [{'type': 'text', 'text': system_prompt}],
@@ -277,7 +769,7 @@ def _qwen_multi_image_generate(processor, model, images, system_prompt: str) -> 
         'role': 'user',
         'content': [
             *({'type': 'image', 'image': image} for image in images),
-            {'type': 'text', 'text': _LOCAL_USER_PROMPT},
+            {'type': 'text', 'text': user_prompt},
         ],
     }]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -286,14 +778,16 @@ def _qwen_multi_image_generate(processor, model, images, system_prompt: str) -> 
     output_ids = model.generate(
         **inputs,
         max_new_tokens=max(256, config.VLM_MAX_TOKENS),
-        do_sample=False,
+        do_sample=do_sample,
+        temperature=(config.LOCAL_VLM_TEMPERATURE if do_sample else None),
+        top_p=(config.LOCAL_VLM_TOP_P if do_sample else None),
     )
     trimmed = [out[len(inp):] for inp, out in zip(inputs['input_ids'], output_ids)]
     raw = processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
     return raw
 
 
-def _smolvlm_multi_image_generate(processor, model, images, system_prompt: str) -> str:
+def _smolvlm_multi_image_generate(processor, model, images, system_prompt: str, user_prompt: str, do_sample: bool = False) -> str:
     conversation = [{
         'role': 'system',
         'content': [{'type': 'text', 'text': system_prompt}],
@@ -301,7 +795,7 @@ def _smolvlm_multi_image_generate(processor, model, images, system_prompt: str) 
         'role': 'user',
         'content': [
             *({'type': 'image', 'image': image} for image in images),
-            {'type': 'text', 'text': _LOCAL_USER_PROMPT},
+            {'type': 'text', 'text': user_prompt},
         ],
     }]
     inputs = processor.apply_chat_template(
@@ -318,11 +812,104 @@ def _smolvlm_multi_image_generate(processor, model, images, system_prompt: str) 
     output_ids = model.generate(
         **inputs,
         max_new_tokens=max(256, config.VLM_MAX_TOKENS),
-        do_sample=False,
+        do_sample=do_sample,
+        temperature=(config.LOCAL_VLM_TEMPERATURE if do_sample else None),
+        top_p=(config.LOCAL_VLM_TOP_P if do_sample else None),
     )
     new_tokens = output_ids[:, inputs['input_ids'].shape[1]:]
     raw = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
     return raw
+
+
+def _qwen_multi_image_generate_with_prompt(processor, model, images, system_prompt: str, user_prompt: str) -> str:
+    messages = [{
+        'role': 'system',
+        'content': [{'type': 'text', 'text': system_prompt}],
+    }, {
+        'role': 'user',
+        'content': [
+            *({'type': 'image', 'image': image} for image in images),
+            {'type': 'text', 'text': user_prompt},
+        ],
+    }]
+    text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+    inputs = processor(text=[text], images=images, return_tensors='pt', padding=True)
+    inputs = {key: value.to(model.device) for key, value in inputs.items()}
+    output_ids = model.generate(**inputs, max_new_tokens=max(256, config.VLM_MAX_TOKENS), do_sample=False)
+    trimmed = [out[len(inp):] for inp, out in zip(inputs['input_ids'], output_ids)]
+    return processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
+
+
+def _smolvlm_multi_image_generate_with_prompt(processor, model, images, system_prompt: str, user_prompt: str) -> str:
+    conversation = [{
+        'role': 'system',
+        'content': [{'type': 'text', 'text': system_prompt}],
+    }, {
+        'role': 'user',
+        'content': [
+            *({'type': 'image', 'image': image} for image in images),
+            {'type': 'text', 'text': user_prompt},
+        ],
+    }]
+    inputs = processor.apply_chat_template(
+        conversation,
+        add_generation_prompt=True,
+        tokenize=True,
+        return_dict=True,
+        return_tensors='pt',
+    )
+    inputs = {key: (value.to(model.device) if hasattr(value, 'to') else value) for key, value in inputs.items()}
+    output_ids = model.generate(**inputs, max_new_tokens=max(256, config.VLM_MAX_TOKENS), do_sample=False)
+    new_tokens = output_ids[:, inputs['input_ids'].shape[1]:]
+    return processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+
+
+def _build_repair_prompt(semantic_context: Dict[str, Any], python_code: str, error_text: str) -> str:
+    return _LOCAL_REPAIR_PROMPT_TEMPLATE.format(
+        semantic_json=json.dumps(semantic_context or {}, ensure_ascii=False, indent=2),
+        python_code=python_code or '',
+        error_text=error_text or 'unknown_error',
+    )
+
+
+def _build_refinement_prompt(semantic_context: Dict[str, Any], python_code: str, error_text: str) -> str:
+    return _LOCAL_REFINEMENT_PROMPT_TEMPLATE.format(
+        semantic_json=json.dumps(semantic_context or {}, ensure_ascii=False, indent=2),
+        python_code=python_code or '',
+        error_text=error_text or 'too_generic',
+    )
+
+
+def _build_repair_prompt_with_summary(
+    frames_b64: Sequence[str],
+    semantic_context: Dict[str, Any],
+    python_code: str,
+    error_text: str,
+) -> str:
+    summary = _infer_visual_motion_summary(frames_b64)
+    base = _build_repair_prompt(semantic_context, python_code, error_text)
+    return (
+        base
+        + "\n\nCheap motion summary from the same frames:\n"
+        + json.dumps(summary, ensure_ascii=False, indent=2)
+        + "\nUse it to keep the repaired code grounded in the observed motion."
+    )
+
+
+def _build_refinement_prompt_with_summary(
+    frames_b64: Sequence[str],
+    semantic_context: Dict[str, Any],
+    python_code: str,
+    error_text: str,
+) -> str:
+    summary = _infer_visual_motion_summary(frames_b64)
+    base = _build_refinement_prompt(semantic_context, python_code, error_text)
+    return (
+        base
+        + "\n\nCheap motion summary from the same frames:\n"
+        + json.dumps(summary, ensure_ascii=False, indent=2)
+        + "\nUse it to produce a less generic and more clip-specific result."
+    )
 
 
 def _normalize_generated_code(code: str) -> str:
@@ -343,10 +930,61 @@ def _normalize_generated_code(code: str) -> str:
         'left_shoulder': 'LShoulderPitch',
         'neck_yaw': 'HeadYaw',
         'neck_pitch': 'HeadPitch',
+        'head_yaw': 'HeadYaw',
+        'head_pitch': 'HeadPitch',
+        'right_shoulder_pitch': 'RShoulderPitch',
+        'right_shoulder_roll': 'RShoulderRoll',
+        'right_elbow_yaw': 'RElbowYaw',
+        'right_elbow_roll': 'RElbowRoll',
+        'right_wrist_yaw': 'RWristYaw',
+        'rightwristy': 'RWristYaw',
+        'rightwristyaw': 'RWristYaw',
+        'left_shoulder_pitch': 'LShoulderPitch',
+        'left_shoulder_roll': 'LShoulderRoll',
+        'left_elbow_yaw': 'LElbowYaw',
+        'left_elbow_roll': 'LElbowRoll',
+        'left_wrist_yaw': 'LWristYaw',
+        'leftwristy': 'LWristYaw',
+        'leftwristyaw': 'LWristYaw',
     }
     for src, dst in replacements.items():
         normalized = normalized.replace(f'"{src}"', f'"{dst}"')
         normalized = normalized.replace(f"'{src}'", f"'{dst}'")
+
+    normalized = re.sub(r'\bheadYaw\b', 'HeadYaw', normalized)
+    normalized = re.sub(r'\bheadPitch\b', 'HeadPitch', normalized)
+    normalized = re.sub(r'\brShoulderPitch\b', 'RShoulderPitch', normalized)
+    normalized = re.sub(r'\brShoulderRoll\b', 'RShoulderRoll', normalized)
+    normalized = re.sub(r'\brElbowYaw\b', 'RElbowYaw', normalized)
+    normalized = re.sub(r'\brElbowRoll\b', 'RElbowRoll', normalized)
+    normalized = re.sub(r'\brWristYaw\b', 'RWristYaw', normalized)
+    normalized = re.sub(r'\bRightWristY\b', 'RWristYaw', normalized)
+    normalized = re.sub(r'\bRightWristYaw\b', 'RWristYaw', normalized)
+    normalized = re.sub(r'\blShoulderPitch\b', 'LShoulderPitch', normalized)
+    normalized = re.sub(r'\blShoulderRoll\b', 'LShoulderRoll', normalized)
+    normalized = re.sub(r'\blElbowYaw\b', 'LElbowYaw', normalized)
+    normalized = re.sub(r'\blElbowRoll\b', 'LElbowRoll', normalized)
+    normalized = re.sub(r'\blWristYaw\b', 'LWristYaw', normalized)
+    normalized = re.sub(r'\bLeftWristY\b', 'LWristYaw', normalized)
+    normalized = re.sub(r'\bLeftWristYaw\b', 'LWristYaw', normalized)
+
+    left_sign_fixes = {
+        'LShoulderRoll': (0.0, None),
+        'LElbowYaw': (None, None),
+        'LElbowRoll': (None, 0.0),
+    }
+    for joint_name, (must_be_ge, must_be_le) in left_sign_fixes.items():
+        pattern = re.compile(rf"(['\"])({joint_name})\1\s*:\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)")
+        def _fix(match):
+            quote = match.group(1)
+            name = match.group(2)
+            value = float(match.group(3))
+            if must_be_ge is not None and value < must_be_ge:
+                value = abs(value)
+            if must_be_le is not None and value > must_be_le:
+                value = -abs(value)
+            return f"{quote}{name}{quote}: {value:.4f}"
+        normalized = pattern.sub(_fix, normalized)
 
     lines = [line.rstrip() for line in normalized.splitlines()]
     return '\n'.join(lines).strip()
@@ -362,7 +1000,9 @@ class VLMClient:
     ) -> None:
         self.api_key = api_key or config.LLM_API_KEY or None
         self.base_url = base_url or config.LLM_BASE_URL or None
+        self.joint_limits = dict(joint_limits or {})
         self.system_prompt = build_system_prompt(joint_limits)
+        self.static_validator = _build_static_validator(self.joint_limits)
         self.backend = _pick_backend(self.api_key)
         self.client = None
 
@@ -391,6 +1031,11 @@ class VLMClient:
         if self.backend == 'openai':
             return self._call_openai(frames_b64)
         return self._call_local(frames_b64)
+
+    def repair(self, frames_b64: Sequence[str], semantic_context: Dict[str, Any], python_code: str, error_text: str) -> VLMResponse:
+        if self.backend == 'openai':
+            return VLMResponse({}, '', '', 0.0, False, error='repair_not_supported_on_openai_backend')
+        return self._repair_local(frames_b64, semantic_context, python_code, error_text)
 
     def _call_openai(self, frames_b64: Sequence[str]) -> VLMResponse:
         if not frames_b64:
@@ -446,18 +1091,73 @@ class VLMClient:
             images = _decode_frames_to_pil(frames_b64)
             processor, model, kind = _load_local_model(self.model)
 
-            if kind == 'qwen2_5_vl':
-                raw = _qwen_multi_image_generate(processor, model, images, self.system_prompt)
-            else:
-                raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt)
+            summary = _infer_visual_motion_summary(frames_b64)
+            user_prompt = _build_local_user_prompt(frames_b64)
+            candidate_count = max(1, int(config.LOCAL_VLM_NUM_CANDIDATES))
+            raw_candidates: List[str] = []
 
-            semantic, code = parse_vlm_output(raw)
-            code = _normalize_generated_code(code)
-            ok = bool(code) and bool(semantic)
+            for idx in range(candidate_count):
+                do_sample = idx > 0
+                if kind == 'qwen2_5_vl':
+                    raw = _qwen_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=do_sample)
+                else:
+                    raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=do_sample)
+                raw_candidates.append(raw)
+
+            best_semantic: Dict[str, Any] = {}
+            best_code = ''
+            best_raw = raw_candidates[0] if raw_candidates else ''
+            best_score = -1e9
+
+            for raw in raw_candidates:
+                semantic, code = parse_vlm_output(raw)
+                code = _normalize_generated_code(code)
+                score = _score_candidate_response(semantic, code, summary)
+                validation = self.static_validator.validate(code)
+                if validation.ok:
+                    score += 3.0
+                else:
+                    score -= 6.0
+                if config.LOCAL_VLM_DEBUG:
+                    print(f'[VLMClient][local] candidate score={score:.2f} valid={validation.ok} semantic={semantic}')
+                if score > best_score:
+                    best_score = score
+                    best_semantic = semantic
+                    best_code = code
+                    best_raw = raw
+
+            if best_code and _looks_too_generic_for_clip(best_semantic, best_code):
+                refinement_prompt = _build_refinement_prompt_with_summary(
+                    frames_b64,
+                    best_semantic,
+                    best_code,
+                    'candidate_too_generic_for_this_clip',
+                )
+                if kind == 'qwen2_5_vl':
+                    refined_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, refinement_prompt)
+                else:
+                    refined_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, refinement_prompt)
+                refined_semantic, refined_code = parse_vlm_output(refined_raw)
+                refined_code = _normalize_generated_code(refined_code)
+                refined_score = _score_candidate_response(refined_semantic, refined_code, summary)
+                refined_validation = self.static_validator.validate(refined_code)
+                if refined_validation.ok:
+                    refined_score += 3.0
+                else:
+                    refined_score -= 6.0
+                if config.LOCAL_VLM_DEBUG:
+                    print(f'[VLMClient][local] refinement score={refined_score:.2f} valid={refined_validation.ok} semantic={refined_semantic}')
+                if refined_score >= best_score and refined_code:
+                    best_score = refined_score
+                    best_semantic = refined_semantic
+                    best_code = refined_code
+                    best_raw = refined_raw
+
+            ok = bool(best_code) and bool(best_semantic)
             return VLMResponse(
-                semantic_context=semantic,
-                python_code=code,
-                raw_text=raw,
+                semantic_context=best_semantic,
+                python_code=best_code,
+                raw_text=best_raw,
                 elapsed_seconds=time.time() - t0,
                 ok=ok,
                 error=None if ok else 'parse_incomplete',
@@ -485,6 +1185,34 @@ class VLMClient:
                 elapsed_seconds=float(payload.get('elapsed_seconds') or (time.time() - t0)),
                 ok=bool(payload.get('ok')),
                 error=payload.get('error'),
+            )
+        except Exception as exc:
+            return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
+
+    def _repair_local(self, frames_b64: Sequence[str], semantic_context: Dict[str, Any], python_code: str, error_text: str) -> VLMResponse:
+        if not frames_b64:
+            return VLMResponse({}, '', '', 0.0, False, error='no frames provided')
+
+        t0 = time.time()
+        try:
+            images = _decode_frames_to_pil(frames_b64)
+            processor, model, kind = _load_local_model(self.model)
+            repair_prompt = _build_repair_prompt_with_summary(frames_b64, semantic_context, python_code, error_text)
+            if kind == 'qwen2_5_vl':
+                raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
+            else:
+                raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
+
+            semantic, code = parse_vlm_output(raw)
+            code = _normalize_generated_code(code)
+            ok = bool(code) and bool(semantic)
+            return VLMResponse(
+                semantic_context=semantic,
+                python_code=code,
+                raw_text=raw,
+                elapsed_seconds=time.time() - t0,
+                ok=ok,
+                error=None if ok else 'parse_incomplete',
             )
         except Exception as exc:
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))

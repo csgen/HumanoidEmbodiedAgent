@@ -78,6 +78,10 @@ VLM_IMAGE_DETAIL = 'low'         # 'low' ≈ 85 tokens/image, 'high' ≈ 1100+ t
 VLM_SCENARIO_HINT = os.getenv('VLM_SCENARIO_HINT', '').strip()
 LOCAL_VLM_MODEL = os.getenv('LOCAL_VLM_MODEL', 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct').strip()
 LOCAL_VLM_SERVER_URL = os.getenv('LOCAL_VLM_SERVER_URL', '').strip()
+LOCAL_VLM_NUM_CANDIDATES = max(1, int(os.getenv('LOCAL_VLM_NUM_CANDIDATES', '3')))
+LOCAL_VLM_TEMPERATURE = float(os.getenv('LOCAL_VLM_TEMPERATURE', '0.65'))
+LOCAL_VLM_TOP_P = float(os.getenv('LOCAL_VLM_TOP_P', '0.92'))
+LOCAL_VLM_DEBUG = os.getenv('LOCAL_VLM_DEBUG', '1').strip().lower() not in {'0', 'false', 'no'}
 
 # ---------------------------------------------------------------------------
 # Robot control

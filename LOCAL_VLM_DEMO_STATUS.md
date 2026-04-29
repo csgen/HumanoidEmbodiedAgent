@@ -8,6 +8,16 @@
 
 这个 Demo 的目标不是“机器人模仿人类动作”，而是“机器人像宠物一样，对人类动作做出合适回应”。
 
+## 当前所处 Phase
+
+对照 `Humanoid Embodied Agent — Proposal vs Current Implementation Analysis & Refined Plan.md`，
+当前工作最准确地属于：
+
+- `Phase 3` 收尾：prompt redesign + sandbox hookup
+- `Phase 4` 进行中：fallback + safety
+
+还没有进入完整的 `Phase 5` 评测框架，也没有做完 `Phase 6` stretch goals。
+
 ## 已完成内容
 
 - 新增本地 VLM 响应链路，支持直接从多帧视频生成机器人控制代码。
@@ -93,6 +103,38 @@
 - 这些原语只是执行接口，不是高层硬编码动作类别。
 - VLM 需要直接决定用哪些关节、以什么角度、什么时长来组合行为。
 
+### 3) 本地 VLM 候选筛选增强
+
+这轮新增了几项专门面向“不要所有视频都退化成同一段腕部动作”的改进：
+
+- 本地 VLM 从单候选改为多候选生成。
+- 对多个候选做静态打分与筛选，而不是盲目接受第一条输出。
+- 给每段视频提取低层时序摘要：
+  - `motion_energy`
+  - `dominant_axis`
+  - `lateral_bias`
+  - `vertical_bias`
+  - `activity_level`
+- 把这些低层摘要作为弱约束写回 prompt，帮助小模型把：
+  - 横向动作更偏向头部朝向 / 肩肘朝向
+  - 纵向或静态动作更偏向抬头低头 / hold
+  - 高活动动作更偏向短促动态响应
+
+这里仍然没有引入“手势类别 -> 固定机器人动作模板”的硬编码映射。
+
+### 4) 静态校验与修复增强
+
+- 新增 sandbox 预检：
+  - 禁止 `navigate_to`
+  - 禁止下肢关节
+  - 检查 joint limits
+  - 检查异常 oscillation 振幅 / 频率 / 时长
+  - 检查无意义 IK 目标
+- 新增本地 VLM 的 repair / refinement 路径：
+  - 首次代码不可执行时，仍然交给 VLM 自修复
+  - 候选过于 generic 时，再让 VLM 基于同一视频二次重写
+- 新增 joint alias 归一化，减少小模型输出关节名不标准导致的失败。
+
 ## 当前离线验证结果
 
 当前更关键的验证目标是：
@@ -101,6 +143,27 @@
 - 输出的 Python 是否只使用允许的低层原语
 - 执行动作是否在 Webots 中自然且不越界
 
+本轮离线回归重点测试了 3 条代表视频：
+
+- `debug_video_samples/waving__portrait_guy_waving_hand__QvJaZ0h94Eo.mp4`
+- `debug_video_samples/pointing__pointing_gesture__emA8oMXjnb4.mp4`
+- `debug_video_samples/stop__stop_palm_gesture__j7QHtHhw5as.mp4`
+
+当前结果：
+
+- `waving`
+  - 候选中已经能生成“腕部轻摆 + 上半身恢复”的组合，不再只剩单行代码。
+- `pointing`
+  - 候选开始出现 `HeadYaw` / 肩部朝向参与，和 waving 有明显区别。
+- `stop`
+  - 候选能稳定选出 `static + hold` 风格，和 waving / pointing 明显不同。
+
+这说明当前分支相比主分支，已经出现了可展示的新进展：
+
+- 不再只是单一路径的腕部摆动
+- VLM 生成代码开始对不同输入视频表现出差异化
+- 差异化仍然通过 VLM 直出控制代码完成，而不是手势标签模板
+
 ## 仍然待继续优化的问题
 
 目前仍待继续优化的重点是：
@@ -108,6 +171,14 @@
 - 本地小模型生成结构化控制代码的成功率
 - 多帧时序理解质量
 - 生成代码的自然度与可执行性
+- `thumbs_up` 这类样例仍可能回落到偏 generic 的腕部动作
+- 当前离线改进已明显优于之前，但还不能宣称“任意视频都能自然稳定反应”
+
+换句话说：
+
+- “不是硬编码模板” 这一点已经明确达成
+- “不同输入能明显产生不同响应” 这一点已经有进展
+- “所有样例都像成熟宠物机器人一样自然” 这一点还没有完全达成
 
 ## 目前最适合展示的样例
 
@@ -126,8 +197,24 @@
 
 下一步优先做两件事：
 
-1. 提高本地 VLM 直出 `json + python` 的成功率。
-2. 优先稳定 4 个代表性样例，再扩展到其余样例。
+1. 优先继续稳定 `thumbs_up / yes_nod / no_shake` 这类细粒度样例。
+2. 在 Webots 中复核当前离线最佳候选的观感，继续修“动作看着怪”的问题。
+
+如果后续本地 3B 模型仍然明显不够，可以考虑：
+
+- 保持“VLM 直出控制代码”这个原则不变
+- 但更换成更强的本地视频模型或量化模型
+- 仍然不回退到“手势标签 -> 固定动作模板”方案
+
+## 新增调试脚本
+
+- `scripts/offline_local_vlm_debug.py`
+  - 直接把本地 mp4 送入本地 VLM
+  - 打印 `semantic_context`
+  - 打印生成的 Python 控制代码
+  - 用静态 validator 检查代码是否可接受
+
+适合在 conda 环境中做快速离线回归。
 
 ## 运行方式
 

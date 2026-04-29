@@ -60,6 +60,7 @@ from controller import Supervisor
 import config
 from frame_buffer import FrameBuffer
 from idle_animator import IdleAnimator
+from fallback import FallbackPolicy
 from sandbox_exec import SandboxExecutor
 from vlm_trigger import VLMTrigger
 
@@ -731,6 +732,23 @@ def _run_oneshot_demo(
         print(f'[oneshot] semantic context: {rsp.semantic_context}')
         print(f'[oneshot] code:\n{rsp.python_code}\n')
         exec_result = executor.run(rsp.python_code)
+        if (not exec_result.ok) and hasattr(client, 'repair'):
+            print(f'[oneshot] first execution failed, asking local VLM to repair: {exec_result.error}')
+            repaired_rsp = client.repair(
+                frames,
+                rsp.semantic_context,
+                rsp.python_code,
+                exec_result.error or 'execution_failed',
+            )
+            if repaired_rsp.ok:
+                print(f'[oneshot] repaired semantic context: {repaired_rsp.semantic_context}')
+                print(f'[oneshot] repaired code:\n{repaired_rsp.python_code}\n')
+                repaired_exec_result = executor.run(repaired_rsp.python_code)
+                if repaired_exec_result.ok:
+                    rsp = repaired_rsp
+                    exec_result = repaired_exec_result
+                else:
+                    print(f'[oneshot] repaired execution still failed: {repaired_exec_result.error}')
         artifact_dir = _save_oneshot_artifacts(frames, rsp, exec_result)
         if exec_result.ok:
             print(f'[oneshot] execution OK in {exec_result.elapsed_seconds:.2f}s')
@@ -808,6 +826,7 @@ def main():
 
     # 6. Sandbox executor
     executor = SandboxExecutor()
+    executor.set_joint_limits(vlm_api.get_joint_limits())
     executor.register_many({
         'move_joint': vlm_api.move_joint,
         'move_joints': vlm_api.move_joints,
@@ -824,6 +843,8 @@ def main():
         'set_posture': vlm_api.set_posture,
     })
     print(f'[init] sandbox exposes: {executor.registered_names}')
+
+    fallback = FallbackPolicy(idle_fn=vlm_api.idle)
 
     if config.RUN_MODE == 'oneshot':
         print('[init] run mode: oneshot')
@@ -899,18 +920,27 @@ def main():
                     result = executor.run(rsp.python_code)
                     if result.ok:
                         print(f'[VLM] exec OK in {result.elapsed_seconds:.2f}s')
+                        fallback.record_success(rsp)
                     else:
                         print(f'[VLM] exec FAILED: {result.error}')
                         if result.traceback:
                             print(result.traceback)
+                        decision = fallback.handle_failure(f'exec_failed:{result.error}')
+                        if decision.action == 'replay' and decision.python_code:
+                            replay_result = executor.run(decision.python_code)
+                            print(f'[fallback] replay -> ok={replay_result.ok} error={replay_result.error}')
                     # Whether exec succeeded or failed, open the post-action
                     # observation window so we see the human's reaction.
                     trigger.mark_action_done()
                 else:
                     print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
-                    # Call failed before any motion happened - back to IDLE
-                    # so we can retry on next motion event.
-                    trigger.mark_idle()
+                    decision = fallback.handle_failure(f'call_failed:{rsp.error}')
+                    if decision.action == 'replay' and decision.python_code:
+                        replay_result = executor.run(decision.python_code)
+                        print(f'[fallback] replay -> ok={replay_result.ok} error={replay_result.error}')
+                        trigger.mark_action_done()
+                    else:
+                        trigger.mark_idle()
 
     # Shutdown
     if buffer is not None:
