@@ -487,6 +487,50 @@ def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any
     return False
 
 
+def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
+    if not code:
+        return 1e6
+    penalty = 0.0
+    lines = [line.strip() for line in code.splitlines() if line.strip() and not line.strip().startswith('#')]
+    calls = _parse_code_calls(code)
+    fn_names = [name for name, _ in calls]
+    unique_fns = set(fn_names)
+    activity = str((summary or {}).get('activity_level') or 'low').lower()
+
+    if len(lines) > 8:
+        penalty += 4.0
+    if len(lines) <= 1:
+        penalty += 5.0
+    if 'idle' in unique_fns and len(unique_fns) == 1:
+        penalty += 4.0
+    if 'hold' in unique_fns and len(unique_fns) == 1:
+        penalty += 3.0
+
+    oscillation_count = fn_names.count('oscillate_joint')
+    move_arm_count = fn_names.count('move_arm_ik')
+    move_joint_count = fn_names.count('move_joint') + fn_names.count('move_joints')
+    hand_count = fn_names.count('set_hand')
+
+    if oscillation_count >= 3:
+        penalty += 2.5
+    if oscillation_count >= 1 and move_arm_count == 0 and move_joint_count == 0:
+        penalty += 3.0
+    if move_arm_count >= 4:
+        penalty += 2.0
+    if hand_count >= 4:
+        penalty += 1.5
+
+    if activity in {'medium', 'high'} and move_arm_count == 0 and move_joint_count == 0:
+        penalty += 3.0
+    if activity == 'low' and oscillation_count >= 2:
+        penalty += 2.0
+
+    if 'set_hand(' in code and 'move_arm_ik(' not in code and 'move_joints(' not in code:
+        penalty += 2.5
+
+    return penalty
+
+
 def _pick_backend(api_key: Optional[str]) -> str:
     requested = config.VLM_BACKEND
     if requested in {'openai', 'local'}:
@@ -1228,7 +1272,10 @@ class VLMClient:
                         error=None,
                     )
                 return VLMResponse({}, '', repaired_raw, time.time() - t0, False, error=f'parse_incomplete:{repaired_validation.error}')
-            pool = valid_candidates
+            pool = sorted(
+                valid_candidates,
+                key=lambda item: _naturalness_penalty(summary, item[1]),
+            )
 
             if len(pool) == 1:
                 best_semantic, best_code, best_raw = pool[0]
@@ -1246,7 +1293,10 @@ class VLMClient:
                 else:
                     best_semantic, best_code, best_raw = pool[0]
 
-            if best_code and _looks_too_generic_for_clip(summary, best_semantic, best_code):
+            if best_code and (
+                _looks_too_generic_for_clip(summary, best_semantic, best_code)
+                or _naturalness_penalty(summary, best_code) >= 3.0
+            ):
                 refinement_prompt = _build_refinement_prompt_with_summary(
                     frames_b64,
                     best_semantic,
