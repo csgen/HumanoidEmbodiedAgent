@@ -210,6 +210,23 @@ class NaoVlmAPI:
         }
         return state
 
+    def _side_arm_joint_names(self, side: str) -> List[str]:
+        prefix = 'L' if side == 'left' else 'R'
+        return [
+            f'{prefix}ShoulderPitch',
+            f'{prefix}ShoulderRoll',
+            f'{prefix}ElbowYaw',
+            f'{prefix}ElbowRoll',
+            f'{prefix}WristYaw',
+        ]
+
+    def _joint_velocity_indices(self, joint_name: str) -> List[int]:
+        if joint_name not in self.model.names:
+            return []
+        jid = self.model.getJointId(joint_name)
+        joint = self.model.joints[jid]
+        return list(range(joint.idx_v, joint.idx_v + joint.nv))
+
     def capture_camera_image(self, save_path: str = 'vlm_view.jpg') -> str:
         if 'CameraTop' not in self.cameras:
             return 'ERROR: Top camera not found.'
@@ -281,8 +298,17 @@ class NaoVlmAPI:
 
         frame_id = self.hand_frames[side]
         q = self.q_current.copy()
+        allowed_joint_names = [
+            name for name in self._side_arm_joint_names(side)
+            if name in self.motors and name in self.model.names
+        ]
+        if not allowed_joint_names:
+            return f'ERROR: no controllable arm joints for side={side!r}'
+        allowed_velocity_indices = []
+        for joint_name in allowed_joint_names:
+            allowed_velocity_indices.extend(self._joint_velocity_indices(joint_name))
 
-        # IK: iterate to convergence (keep existing bugfix: lock floating base).
+        # IK: only allow the selected arm chain to move.
         reached = False
         for _ in range(30):
             pin.forwardKinematics(self.model, self.data, q)
@@ -295,14 +321,21 @@ class NaoVlmAPI:
             J = pin.computeFrameJacobian(
                 self.model, self.data, q, frame_id, pin.LOCAL_WORLD_ALIGNED
             )[:3, :]
-            J[:, :6] = 0.0   # lock floating base so the torso doesn't "absorb" the delta
-            dq = np.linalg.pinv(J) @ err
+            enabled = np.zeros(J.shape[1], dtype=bool)
+            for idx in allowed_velocity_indices:
+                if 0 <= idx < J.shape[1]:
+                    enabled[idx] = True
+            J[:, ~enabled] = 0.0
+            damping = 1e-4
+            JJt = J @ J.T + damping * np.eye(J.shape[0])
+            dq = J.T @ np.linalg.solve(JJt, err)
             q = pin.integrate(self.model, q, dq * 0.5)
 
-        # Extract target angles for the Webots motors we control
+        # Extract target angles only for the selected arm so IK never drags
+        # unrelated joints into the motion.
         target_angles = {}
-        for motor_name in self.motors:
-            if motor_name in self.model.names:
+        for motor_name in allowed_joint_names:
+            if motor_name in self.model.names and motor_name in self.motors:
                 jid = self.model.getJointId(motor_name)
                 qi = self.model.joints[jid].idx_q
                 target_angles[motor_name] = float(q[qi])

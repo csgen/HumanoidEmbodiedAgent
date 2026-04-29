@@ -115,21 +115,19 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 # Diversity and grounding requirements
 - Different input clips should generally produce DIFFERENT control code.
 - Reusing the same wrist-only oscillation for unrelated clips is incorrect.
-- Base side choice, dominant joints, tempo, and hold-vs-oscillation decisions on
+- Base side choice, dominant joints, timing, and stillness-vs-motion decisions on
   the actual frame sequence.
-- If the human motion is mostly static, orienting and holding are often more
-  grounded than repeated oscillation.
-- If the motion is lateral or directional, let head/arm orientation naturally
-  reflect that direction when appropriate.
-- If the human appears approving, welcoming, or playful, a gentle pet-like
-  acknowledgment is acceptable, but do not hardcode any named response.
+- Prefer coordinated head + arm + wrist composition over a single isolated joint
+  when the frames support a richer upper-body response.
+- Use very small motion when the clip evidence is weak; use larger but still smooth
+  motion only when the sequence clearly supports it.
 
 # Composition guidance
 - Prefer short sequences of 2-5 primitive calls.
 - Use `move_joints(...)` when a coordinated upper-body posture is needed.
 - Use `hold(...)` when the response should pause, freeze, or attend.
-- Use `oscillate_joint(...)` only when the observed motion really suggests a
-  rhythmic or waving-like response.
+- Use `oscillate_joint(...)` only when the observed motion itself appears repeated
+  across multiple frames.
 - Return smoothly toward a calm upper-body posture after a dynamic motion.
 
 # Output format — MANDATORY
@@ -419,58 +417,13 @@ def _infer_visual_motion_summary(frames_b64: Sequence[str]) -> Dict[str, Any]:
     }
 
 
-def _build_motion_prior_text(summary: Dict[str, Any]) -> str:
-    dominant_axis = str(summary.get('dominant_axis') or 'static')
-    lateral_bias = str(summary.get('lateral_bias') or 'center')
-    vertical_bias = str(summary.get('vertical_bias') or 'center')
-    activity = str(summary.get('activity_level') or 'low')
-    energy = float(summary.get('motion_energy') or 0.0)
-
-    lines = [
-        '# Primitive-level motion prior derived from the clip',
-        '- This prior is low-level and kinematic; use it to ground primitive choice.',
-    ]
-
-    if dominant_axis == 'horizontal':
-        lines.append('- Motion is mainly lateral: prefer HeadYaw / ShoulderRoll / ElbowYaw orientation over wrist-only waving.')
-    elif dominant_axis == 'vertical':
-        lines.append('- Motion is mainly vertical: prefer HeadPitch / ShoulderPitch changes and brief holds over lateral wrist oscillation.')
-    elif dominant_axis == 'mixed':
-        lines.append('- Motion is mixed and relatively energetic: a short composed response with arm lift plus recovery is acceptable.')
-    else:
-        lines.append('- Motion is weak or static: prefer stillness, small orientation, and hold instead of repeated oscillation.')
-
-    if lateral_bias == 'leftward_in_image':
-        lines.append('- The motion drifts left in the image: a lateral orienting response is more grounded than a symmetric response.')
-    elif lateral_bias == 'rightward_in_image':
-        lines.append('- The motion drifts right in the image: a lateral orienting response is more grounded than a symmetric response.')
-
-    if vertical_bias == 'upward_in_image':
-        lines.append('- Upward drift is present: lifting attention or slightly raising the upper body chain can be natural.')
-    elif vertical_bias == 'downward_in_image':
-        lines.append('- Downward drift is present: a mild lowering or settling response can be natural.')
-
-    if activity == 'high':
-        lines.append('- Activity is high: one brief dynamic phase is acceptable, but still return smoothly to a calm posture.')
-    elif activity == 'medium':
-        lines.append('- Activity is medium: use moderate motion; avoid long repetitive oscillations.')
-    else:
-        lines.append('- Activity is low: keep the response short and restrained.')
-
-    if energy < 0.02:
-        lines.append('- Because motion energy is low, holding posture is often more grounded than repeated rhythmic movement.')
-
-    return '\n'.join(lines)
-
-
 def _build_local_user_prompt(frames_b64: Sequence[str]) -> str:
     summary = _infer_visual_motion_summary(frames_b64)
     return (
         _LOCAL_USER_PROMPT
         + "\n\n# Cheap motion summary extracted from the frame sequence\n"
         + json.dumps(summary, ensure_ascii=False, indent=2)
-        + "\nUse this only as weak grounding. The frames remain the main evidence.\n\n"
-        + _build_motion_prior_text(summary)
+        + "\nUse this only as weak grounding. The frames remain the main evidence."
     )
 
 
@@ -520,16 +473,16 @@ def _looks_too_generic_for_clip(semantic: Dict[str, Any], code: str) -> bool:
     calls = _parse_code_calls(code)
     fn_names = [name for name, _ in calls]
     unique_fns = set(fn_names)
-    intent = str(semantic.get('intent') or '').lower()
-    dynamics = str(semantic.get('motion_dynamics') or '').lower()
 
-    if len(lines) <= 2 and unique_fns == {'oscillate_joint'} and 'RWristYaw' in code:
+    if len(lines) <= 2 and unique_fns == {'oscillate_joint'}:
         return True
-    if len(lines) <= 2 and 'point' in intent and 'HeadYaw' not in code and 'ShoulderRoll' not in code and 'ElbowYaw' not in code:
+    if len(lines) <= 2 and unique_fns <= {'move_joint', 'oscillate_joint'}:
         return True
-    if len(lines) <= 2 and ('stop' in intent or dynamics == 'static') and 'hold(' not in code:
+    if len(calls) <= 1:
         return True
-    if len(lines) <= 2 and any(word in intent for word in ('thumb', 'approve', 'approval', 'yes')) and 'HeadPitch' not in code:
+    if unique_fns == {'hold'}:
+        return True
+    if 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns and len(unique_fns) == 1:
         return True
     return False
 
@@ -791,7 +744,7 @@ def _build_refinement_prompt_with_summary(
         base
         + "\n\nCheap motion summary from the same frames:\n"
         + json.dumps(summary, ensure_ascii=False, indent=2)
-        + "\nUse it to produce a less generic and more clip-specific result."
+        + "\nUse it only as weak low-level grounding. Keep the frames as the main evidence."
     )
 
 
@@ -824,8 +777,19 @@ def _normalize_generated_code(code: str) -> str:
 
     normalized = textwrap.dedent(code).strip()
 
+    if normalized.startswith('{') and normalized.endswith('}') and 'oscillate_joint' in normalized:
+        extracted_calls = re.findall(r'"([^"]*(?:move_joint|move_joints|move_arm_ik|oscillate_joint|hold|idle|speak)[^"]*)"', normalized)
+        if extracted_calls:
+            normalized = '\n'.join(call.strip() for call in extracted_calls if call.strip())
+
     for prefix in ('nao.', 'robot.', 'agent.'):
         normalized = normalized.replace(prefix, '')
+
+    normalized = re.sub(
+        r'move_head\s*\(\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)',
+        r"move_joints({'HeadYaw': \1, 'HeadPitch': \2}, \3, 'min_jerk')",
+        normalized,
+    )
 
     replacements = {
         'right_wrist': 'RWristYaw',
@@ -1027,9 +991,34 @@ class VLMClient:
                 if validation.ok:
                     valid_candidates.append((semantic, code, raw))
 
-            pool = valid_candidates or parsed_candidates
-            if not pool:
-                return VLMResponse({}, '', raw_candidates[0] if raw_candidates else '', time.time() - t0, False, error='parse_incomplete')
+            if not valid_candidates:
+                seed_raw = raw_candidates[0] if raw_candidates else ''
+                seed_semantic, seed_code = parse_vlm_output(seed_raw)
+                seed_code = _normalize_generated_code(seed_code)
+                parse_repair_prompt = _build_repair_prompt_with_summary(
+                    frames_b64,
+                    seed_semantic,
+                    seed_code,
+                    'no_valid_candidate_after_static_validation',
+                )
+                if kind == 'qwen2_5_vl':
+                    repaired_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
+                else:
+                    repaired_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
+                repaired_semantic, repaired_code = parse_vlm_output(repaired_raw)
+                repaired_code = _normalize_generated_code(repaired_code)
+                repaired_validation = self.static_validator.validate(repaired_code)
+                if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
+                    return VLMResponse(
+                        semantic_context=repaired_semantic,
+                        python_code=repaired_code,
+                        raw_text=repaired_raw,
+                        elapsed_seconds=time.time() - t0,
+                        ok=True,
+                        error=None,
+                    )
+                return VLMResponse({}, '', repaired_raw, time.time() - t0, False, error=f'parse_incomplete:{repaired_validation.error}')
+            pool = valid_candidates
 
             if len(pool) == 1:
                 best_semantic, best_code, best_raw = pool[0]
@@ -1066,7 +1055,8 @@ class VLMClient:
                 if _candidate_has_minimal_structure(refined_semantic, refined_code) and refined_validation.ok:
                     best_semantic, best_code, best_raw = refined_semantic, refined_code, refined_raw
 
-            if (not best_code or not best_semantic) and parsed_candidates:
+            final_validation = self.static_validator.validate(best_code)
+            if ((not best_code or not best_semantic) or (not final_validation.ok)) and parsed_candidates:
                 fallback_semantic, fallback_code, _ = parsed_candidates[0]
                 parse_repair_prompt = _build_repair_prompt_with_summary(
                     frames_b64,
@@ -1084,14 +1074,15 @@ class VLMClient:
                 if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
                     best_semantic, best_code, best_raw = repaired_semantic, repaired_code, repaired_raw
 
-            ok = bool(best_code) and bool(best_semantic)
+            final_validation = self.static_validator.validate(best_code)
+            ok = bool(best_code) and bool(best_semantic) and final_validation.ok
             return VLMResponse(
                 semantic_context=best_semantic,
                 python_code=best_code,
                 raw_text=best_raw,
                 elapsed_seconds=time.time() - t0,
                 ok=ok,
-                error=None if ok else 'parse_incomplete',
+                error=None if ok else f'invalid_or_incomplete:{final_validation.error}',
             )
         except Exception as exc:
             if _is_probable_cuda_oom(exc):
@@ -1101,7 +1092,6 @@ class VLMClient:
                         torch.cuda.empty_cache()
                     processor, model, kind = _load_local_model_on_cpu(self.model)
                     images = _decode_frames_to_pil(frames_b64)
-                    summary = _infer_visual_motion_summary(frames_b64)
                     user_prompt = _build_local_user_prompt(frames_b64)
                     if kind == 'qwen2_5_vl':
                         raw = _qwen_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=False)
@@ -1109,7 +1099,8 @@ class VLMClient:
                         raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt, user_prompt, do_sample=False)
                     semantic, code = parse_vlm_output(raw)
                     code = _normalize_generated_code(code)
-                    if (not _candidate_has_minimal_structure(semantic, code)) or (not self.static_validator.validate(code).ok):
+                    validation = self.static_validator.validate(code)
+                    if (not _candidate_has_minimal_structure(semantic, code)) or (not validation.ok):
                         repair_prompt = _build_repair_prompt_with_summary(frames_b64, semantic, code, 'cpu_fallback_repair')
                         if kind == 'qwen2_5_vl':
                             raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
@@ -1117,14 +1108,15 @@ class VLMClient:
                             raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
                         semantic, code = parse_vlm_output(raw)
                         code = _normalize_generated_code(code)
-                    ok = bool(code) and bool(semantic)
+                        validation = self.static_validator.validate(code)
+                    ok = bool(code) and bool(semantic) and validation.ok
                     return VLMResponse(
                         semantic_context=semantic,
                         python_code=code,
                         raw_text=raw,
                         elapsed_seconds=time.time() - t0,
                         ok=ok,
-                        error=None if ok else 'parse_incomplete_cpu_fallback',
+                        error=None if ok else f'parse_incomplete_cpu_fallback:{validation.error}',
                     )
                 except Exception as nested_exc:
                     return VLMResponse({}, '', '', time.time() - t0, False, error=str(nested_exc))
@@ -1170,14 +1162,15 @@ class VLMClient:
 
             semantic, code = parse_vlm_output(raw)
             code = _normalize_generated_code(code)
-            ok = bool(code) and bool(semantic)
+            validation = self.static_validator.validate(code)
+            ok = bool(code) and bool(semantic) and validation.ok
             return VLMResponse(
                 semantic_context=semantic,
                 python_code=code,
                 raw_text=raw,
                 elapsed_seconds=time.time() - t0,
                 ok=ok,
-                error=None if ok else 'parse_incomplete',
+                error=None if ok else f'parse_incomplete:{validation.error}',
             )
         except Exception as exc:
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))

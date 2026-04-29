@@ -89,6 +89,12 @@ class SandboxExecutor:
         except Exception:
             return None
 
+    def _keyword_literal(self, node: ast.Call, name: str):
+        for kw in node.keywords:
+            if kw.arg == name:
+                return self._literal(kw.value)
+        return None
+
     def validate(self, code_str: str) -> ValidationResult:
         try:
             tree = ast.parse(code_str)
@@ -117,9 +123,9 @@ class SandboxExecutor:
             if self._walking_forbidden and fn_name == 'navigate_to':
                 return ValidationResult(False, error='navigate_to_forbidden_for_demo')
 
-            if fn_name == 'move_joint' and len(node.args) >= 2:
-                joint_name = self._literal(node.args[0])
-                angle = self._literal(node.args[1])
+            if fn_name == 'move_joint':
+                joint_name = self._literal(node.args[0]) if len(node.args) >= 1 else self._keyword_literal(node, 'name')
+                angle = self._literal(node.args[1]) if len(node.args) >= 2 else self._keyword_literal(node, 'angle')
                 if isinstance(joint_name, str) and joint_name in self._forbidden_joints:
                     return ValidationResult(False, error=f'lower_body_joint_forbidden: {joint_name}')
                 if isinstance(joint_name, str) and self._joint_limits and joint_name not in self._joint_limits:
@@ -130,8 +136,8 @@ class SandboxExecutor:
                         if not (limits[0] <= float(angle) <= limits[1]):
                             return ValidationResult(False, error=f'joint_limit_violation: {joint_name}={angle}')
 
-            if fn_name == 'move_joints' and len(node.args) >= 1:
-                mapping = self._literal(node.args[0])
+            if fn_name == 'move_joints':
+                mapping = self._literal(node.args[0]) if len(node.args) >= 1 else self._keyword_literal(node, 'joint_angles')
                 if isinstance(mapping, dict):
                     for joint_name, angle in mapping.items():
                         if isinstance(joint_name, str) and joint_name in self._forbidden_joints:
@@ -143,13 +149,13 @@ class SandboxExecutor:
                             if not (limits[0] <= float(angle) <= limits[1]):
                                 return ValidationResult(False, error=f'joint_limit_violation: {joint_name}={angle}')
 
-            if fn_name == 'oscillate_joint' and len(node.args) >= 3:
+            if fn_name == 'oscillate_joint':
                 oscillation_calls += 1
-                joint_name = self._literal(node.args[0])
-                center = self._literal(node.args[1])
-                amplitude = self._literal(node.args[2])
-                frequency = self._literal(node.args[3]) if len(node.args) >= 4 else None
-                duration = self._literal(node.args[4]) if len(node.args) >= 5 else None
+                joint_name = self._literal(node.args[0]) if len(node.args) >= 1 else self._keyword_literal(node, 'name')
+                center = self._literal(node.args[1]) if len(node.args) >= 2 else self._keyword_literal(node, 'center')
+                amplitude = self._literal(node.args[2]) if len(node.args) >= 3 else self._keyword_literal(node, 'amplitude')
+                frequency = self._literal(node.args[3]) if len(node.args) >= 4 else self._keyword_literal(node, 'frequency')
+                duration = self._literal(node.args[4]) if len(node.args) >= 5 else self._keyword_literal(node, 'duration')
                 if isinstance(joint_name, str) and joint_name in self._forbidden_joints:
                     return ValidationResult(False, error=f'lower_body_joint_forbidden: {joint_name}')
                 if isinstance(joint_name, str) and self._joint_limits and joint_name not in self._joint_limits:
@@ -167,8 +173,11 @@ class SandboxExecutor:
                 if isinstance(duration, (int, float)) and float(duration) > 3.0:
                     return ValidationResult(False, error=f'oscillation_duration_too_long: {joint_name}')
 
-            if fn_name == 'move_arm_ik' and len(node.args) >= 2:
-                xyz = self._literal(node.args[1])
+            if fn_name == 'move_arm_ik':
+                side = self._literal(node.args[0]) if len(node.args) >= 1 else self._keyword_literal(node, 'side')
+                xyz = self._literal(node.args[1]) if len(node.args) >= 2 else self._keyword_literal(node, 'xyz')
+                if isinstance(side, str) and side not in {'left', 'right'}:
+                    return ValidationResult(False, error=f'invalid_arm_side: {side}')
                 if isinstance(xyz, (list, tuple)) and len(xyz) == 3:
                     try:
                         radius = sum(float(v) * float(v) for v in xyz) ** 0.5
