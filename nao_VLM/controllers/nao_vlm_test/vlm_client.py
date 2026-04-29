@@ -1,15 +1,14 @@
 """
 VLM client — supports both remote OpenAI-compatible backends and a local
-multi-image backend for desktop demos.
+multi-image backend.
 
-Remote backend:
-  - preserves the original contract
-  - frames -> semantic JSON + primitive Python code
+Both backends follow the same contract:
+  - input: chronological video frames
+  - output: semantic JSON + Python primitive code
 
-Local backend:
-  - uses a local VLM to classify the human communicative signal
-  - converts that VLM decision into a pet-like, socially responsive robot
-    action sequence rather than directly mimicking the human
+The local backend does NOT route through hard-coded gesture labels or a fixed
+response library. It asks the local VLM to directly generate the robot control
+program from the observed video frames.
 """
 from __future__ import annotations
 
@@ -17,6 +16,7 @@ import base64
 import io
 import json
 import re
+import textwrap
 import time
 from dataclasses import dataclass
 from threading import Lock
@@ -133,67 +133,18 @@ in the clip and produce exactly one short response sequence.
 
 Extra task hint from operator:
 {scenario_hint}
-
-If the clip looks like a person greeting or trying to engage the robot, prefer
-a clear and legible response that raises one arm and performs a brief wave.
-Keep the full motion sequence short, stable, and visually obvious in Webots.
 """
 
-_LOCAL_RESPONSE_PROMPT = """You are observing a human from a robot-view camera.
-Observe the chronological frames and classify the HUMAN gesture itself.
-Return only one label from this list:
-HUMAN_WAVE_HELLO
-HUMAN_POINT_DIRECTION
-HUMAN_BECKON_COME
-HUMAN_STOP_PALM
-HUMAN_REJECT_NO
-HUMAN_POSITIVE_ACK
-HUMAN_SHRUG_UNCERTAIN
-HUMAN_UNCLEAR
-
-Meanings:
-- HUMAN_WAVE_HELLO: a hello-wave or raised-hand greeting to engage the robot.
-- HUMAN_POINT_DIRECTION: pointing to a direction or object.
-- HUMAN_BECKON_COME: repeated come-here beckoning motion toward the body.
-- HUMAN_STOP_PALM: open palm shown to stop or pause the robot.
-- HUMAN_REJECT_NO: head shaking no, finger wagging no-no, or clear rejecting gesture.
-- HUMAN_POSITIVE_ACK: thumbs-up, clapping, or repeated yes nod.
-- HUMAN_SHRUG_UNCERTAIN: shrugging or clear uncertainty gesture.
-- HUMAN_UNCLEAR: no clear communicative gesture.
-
-Disambiguation rules:
-- A static raised palm facing the robot is HUMAN_STOP_PALM, not HUMAN_WAVE_HELLO.
-- A moving side-to-side hello-wave is HUMAN_WAVE_HELLO.
-- Repeated hand motion drawing toward the torso is HUMAN_BECKON_COME.
-- Extended arm or index finger indicating a direction/object is HUMAN_POINT_DIRECTION.
-- Repeated up-down head motion with little hand motion is HUMAN_POSITIVE_ACK.
-- Repeated left-right head motion with little hand motion is HUMAN_REJECT_NO.
-- Finger wagging no-no is HUMAN_REJECT_NO, not HUMAN_STOP_PALM.
-- If both shoulders/forearms lift outward in an "I don't know" pattern, choose HUMAN_SHRUG_UNCERTAIN.
-
-Choose based on the full sequence, not a single frame. Output only one label."""
-
-_LOCAL_LABELS = {
-    'HUMAN_WAVE_HELLO',
-    'HUMAN_POINT_DIRECTION',
-    'HUMAN_BECKON_COME',
-    'HUMAN_STOP_PALM',
-    'HUMAN_REJECT_NO',
-    'HUMAN_POSITIVE_ACK',
-    'HUMAN_SHRUG_UNCERTAIN',
-    'HUMAN_UNCLEAR',
-}
-
-_LOCAL_GESTURE_TO_RESPONSE = {
-    'HUMAN_WAVE_HELLO': 'PET_GREET_HAPPY',
-    'HUMAN_POINT_DIRECTION': 'PET_ORIENT_FOLLOW',
-    'HUMAN_BECKON_COME': 'PET_APPROACH_CURIOUS',
-    'HUMAN_STOP_PALM': 'PET_FREEZE_RESPECTFUL',
-    'HUMAN_REJECT_NO': 'PET_SOFT_BACKOFF',
-    'HUMAN_POSITIVE_ACK': 'PET_EXCITED_ACK',
-    'HUMAN_SHRUG_UNCERTAIN': 'PET_CONFUSED_HEAD_TILT',
-    'HUMAN_UNCLEAR': 'PET_WATCH_WAIT',
-}
+_LOCAL_USER_PROMPT = (
+    "Analyse the chronological frames below and directly output the required "
+    "JSON context plus Python robot-control program. Do not classify into any "
+    "intermediate human-gesture labels. Do not use any named canned action. "
+    "Directly compose the robot behaviour from the allowed low-level motion "
+    "primitives and joint movements. Use the exact primitive names provided in "
+    "the system instructions. Do not prefix calls with objects like `nao.` or "
+    "`robot.`. Output only the required fenced JSON block and fenced Python "
+    "block."
+)
 
 _LOCAL_MODEL_LOCK = Lock()
 _LOCAL_MODEL_ID: Optional[str] = None
@@ -318,252 +269,39 @@ def _load_local_model(model_id: str):
         return processor, model, kind
 
 
-def _extract_label(raw: str) -> str:
-    text = ' '.join((raw or '').strip().split())
-    for label in _LOCAL_LABELS:
-        if label in text:
-            return label
-    return 'HUMAN_UNCLEAR'
-
-
-def _compile_local_semantics(label: str) -> Dict[str, Any]:
-    response_label = _LOCAL_GESTURE_TO_RESPONSE.get(label, 'PET_WATCH_WAIT')
-    semantic = {
-        'intent': label,
-        'social_distance': 'medium',
-        'affect': 'neutral',
-        'confidence': 0.7,
-        'motion_dynamics': 'static',
-        'observed_gesture': label,
-        'response_label': response_label,
-        'backend': 'local',
-    }
-
-    if label == 'HUMAN_WAVE_HELLO':
-        semantic.update({'intent': 'human greeting or raised-hand engagement', 'affect': 'friendly', 'confidence': 0.9, 'motion_dynamics': 'raising'})
-    elif label == 'HUMAN_POINT_DIRECTION':
-        semantic.update({'intent': 'human pointing to a direction or object', 'affect': 'curious', 'confidence': 0.82, 'motion_dynamics': 'static'})
-    elif label == 'HUMAN_BECKON_COME':
-        semantic.update({'intent': 'human beckoning the robot closer', 'affect': 'curious', 'confidence': 0.8, 'motion_dynamics': 'approaching'})
-    elif label == 'HUMAN_STOP_PALM':
-        semantic.update({'intent': 'human stop signal', 'affect': 'submissive', 'confidence': 0.84, 'motion_dynamics': 'static'})
-    elif label == 'HUMAN_REJECT_NO':
-        semantic.update({'intent': 'human rejection or no signal', 'affect': 'cautious', 'confidence': 0.8, 'motion_dynamics': 'retreating'})
-    elif label == 'HUMAN_POSITIVE_ACK':
-        semantic.update({'intent': 'human approval or positive feedback', 'affect': 'happy', 'confidence': 0.86, 'motion_dynamics': 'oscillatory'})
-    elif label == 'HUMAN_SHRUG_UNCERTAIN':
-        semantic.update({'intent': 'human uncertainty or shrug', 'affect': 'curious', 'confidence': 0.78, 'motion_dynamics': 'static'})
-    return semantic
-
-
-def _compile_local_code(label: str) -> str:
-    if label == 'PET_GREET_HAPPY':
-        return """
-move_joints({
-    'HeadPitch': -0.06,
-    'LShoulderPitch': 1.44,
-    'RShoulderPitch': 0.70,
-    'RShoulderRoll': -0.22,
-    'RElbowYaw': 1.10,
-    'RElbowRoll': 0.72,
-    'RWristYaw': 0.08,
-}, duration=0.72, trajectory='min_jerk')
-hold(0.08)
-move_joint('RShoulderRoll', -0.12, duration=0.18, trajectory='min_jerk')
-move_joint('RShoulderRoll', -0.28, duration=0.20, trajectory='min_jerk')
-move_joint('RShoulderRoll', -0.14, duration=0.18, trajectory='min_jerk')
-move_joint('RShoulderRoll', -0.24, duration=0.20, trajectory='min_jerk')
-move_joint('RWristYaw', -0.12, duration=0.16, trajectory='min_jerk')
-move_joint('RWristYaw', 0.10, duration=0.16, trajectory='min_jerk')
-move_joints({
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'RShoulderRoll': -0.15,
-    'RElbowYaw': 1.20,
-    'RElbowRoll': 0.50,
-    'RWristYaw': 0.0,
-}, duration=0.70, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_ORIENT_FOLLOW':
-        return """
-move_joints({
-    'HeadYaw': 0.30,
-    'HeadPitch': -0.06,
-    'RShoulderPitch': 0.98,
-    'RShoulderRoll': -0.10,
-    'RElbowYaw': 1.10,
-    'RElbowRoll': 0.42,
-    'RWristYaw': -0.12,
-}, duration=0.68, trajectory='min_jerk')
-hold(0.65)
-move_joints({
-    'HeadYaw': 0.0,
-    'HeadPitch': 0.0,
-    'RShoulderPitch': 1.50,
-    'RShoulderRoll': -0.15,
-    'RElbowYaw': 1.20,
-    'RElbowRoll': 0.50,
-    'RWristYaw': 0.0,
-}, duration=0.72, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_APPROACH_CURIOUS':
-        return """
-move_joints({
-    'HeadPitch': -0.14,
-    'LShoulderPitch': 1.26,
-    'RShoulderPitch': 1.26,
-    'LElbowRoll': -0.62,
-    'RElbowRoll': 0.62,
-}, duration=0.56, trajectory='min_jerk')
-move_joint('HeadYaw', 0.10, duration=0.22, trajectory='min_jerk')
-move_joint('HeadYaw', -0.08, duration=0.24, trajectory='min_jerk')
-move_joint('HeadYaw', 0.04, duration=0.20, trajectory='min_jerk')
-hold(0.30)
-move_joints({
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'LElbowRoll': -0.50,
-    'RElbowRoll': 0.50,
-    'HeadYaw': 0.0,
-}, duration=0.66, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_FREEZE_RESPECTFUL':
-        return """
-move_joints({
-    'HeadPitch': 0.12,
-    'LShoulderPitch': 1.56,
-    'RShoulderPitch': 1.56,
-    'LElbowRoll': -0.42,
-    'RElbowRoll': 0.42,
-}, duration=0.38, trajectory='min_jerk')
-hold(1.00)
-move_joints({
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'LElbowRoll': -0.50,
-    'RElbowRoll': 0.50,
-}, duration=0.54, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_SOFT_BACKOFF':
-        return """
-move_joints({
-    'HeadYaw': -0.16,
-    'HeadPitch': 0.10,
-    'LShoulderPitch': 1.56,
-    'RShoulderPitch': 1.56,
-    'LElbowRoll': -0.44,
-    'RElbowRoll': 0.44,
-}, duration=0.42, trajectory='min_jerk')
-hold(0.30)
-move_joints({
-    'HeadYaw': 0.0,
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'LElbowRoll': -0.50,
-    'RElbowRoll': 0.50,
-}, duration=0.56, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_EXCITED_ACK':
-        return """
-move_joints({
-    'HeadPitch': -0.08,
-    'LShoulderPitch': 1.18,
-    'RShoulderPitch': 1.18,
-    'LShoulderRoll': 0.22,
-    'RShoulderRoll': -0.22,
-}, duration=0.42, trajectory='min_jerk')
-move_joint('HeadPitch', 0.03, duration=0.18, trajectory='min_jerk')
-move_joint('HeadPitch', -0.08, duration=0.18, trajectory='min_jerk')
-move_joint('HeadPitch', 0.02, duration=0.18, trajectory='min_jerk')
-move_joints({
-    'LShoulderPitch': 1.06,
-    'RShoulderPitch': 1.06,
-}, duration=0.18, trajectory='min_jerk')
-move_joints({
-    'LShoulderPitch': 1.18,
-    'RShoulderPitch': 1.18,
-}, duration=0.18, trajectory='min_jerk')
-move_joints({
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'HeadPitch': 0.0,
-    'LShoulderRoll': 0.15,
-    'RShoulderRoll': -0.15,
-}, duration=0.44, trajectory='min_jerk')
-""".strip()
-
-    if label == 'PET_CONFUSED_HEAD_TILT':
-        return """
-move_joints({
-    'HeadYaw': 0.20,
-    'HeadPitch': -0.04,
-    'LShoulderPitch': 1.34,
-    'RShoulderPitch': 1.34,
-    'LShoulderRoll': 0.24,
-    'RShoulderRoll': -0.18,
-    'LElbowYaw': -1.00,
-    'RElbowYaw': 1.04,
-    'LElbowRoll': -0.74,
-    'RElbowRoll': 0.62,
-}, duration=0.45, trajectory='min_jerk')
-hold(0.35)
-move_joint('HeadYaw', -0.10, duration=0.32, trajectory='min_jerk')
-hold(0.25)
-move_joints({
-    'HeadYaw': 0.0,
-    'HeadPitch': 0.0,
-    'LShoulderPitch': 1.50,
-    'RShoulderPitch': 1.50,
-    'LShoulderRoll': 0.15,
-    'RShoulderRoll': -0.15,
-    'LElbowYaw': -1.20,
-    'RElbowYaw': 1.20,
-    'LElbowRoll': -0.50,
-    'RElbowRoll': 0.50,
-}, duration=0.50, trajectory='min_jerk')
-""".strip()
-
-    return "idle(1.00)"
-
-
-def _compile_local_response(label: str) -> Tuple[Dict[str, Any], str]:
-    semantic = _compile_local_semantics(label)
-    code = _compile_local_code(semantic.get('response_label', 'PET_WATCH_WAIT'))
-    return semantic, code
-
-
-def _qwen_multi_image_classify(processor, model, images) -> str:
+def _qwen_multi_image_generate(processor, model, images, system_prompt: str) -> str:
     messages = [{
+        'role': 'system',
+        'content': [{'type': 'text', 'text': system_prompt}],
+    }, {
         'role': 'user',
         'content': [
             *({'type': 'image', 'image': image} for image in images),
-            {'type': 'text', 'text': _LOCAL_RESPONSE_PROMPT},
+            {'type': 'text', 'text': _LOCAL_USER_PROMPT},
         ],
     }]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = processor(text=[text], images=images, return_tensors='pt', padding=True)
     inputs = {key: value.to(model.device) for key, value in inputs.items()}
-    output_ids = model.generate(**inputs, max_new_tokens=16, do_sample=False)
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=max(256, config.VLM_MAX_TOKENS),
+        do_sample=False,
+    )
     trimmed = [out[len(inp):] for inp, out in zip(inputs['input_ids'], output_ids)]
     raw = processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
     return raw
 
 
-def _smolvlm_multi_image_classify(processor, model, images) -> str:
+def _smolvlm_multi_image_generate(processor, model, images, system_prompt: str) -> str:
     conversation = [{
+        'role': 'system',
+        'content': [{'type': 'text', 'text': system_prompt}],
+    }, {
         'role': 'user',
         'content': [
             *({'type': 'image', 'image': image} for image in images),
-            {'type': 'text', 'text': _LOCAL_RESPONSE_PROMPT},
+            {'type': 'text', 'text': _LOCAL_USER_PROMPT},
         ],
     }]
     inputs = processor.apply_chat_template(
@@ -577,10 +315,41 @@ def _smolvlm_multi_image_classify(processor, model, images) -> str:
         key: (value.to(model.device) if hasattr(value, 'to') else value)
         for key, value in inputs.items()
     }
-    output_ids = model.generate(**inputs, max_new_tokens=16, do_sample=False)
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=max(256, config.VLM_MAX_TOKENS),
+        do_sample=False,
+    )
     new_tokens = output_ids[:, inputs['input_ids'].shape[1]:]
     raw = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
     return raw
+
+
+def _normalize_generated_code(code: str) -> str:
+    if not code:
+        return code
+
+    normalized = textwrap.dedent(code).strip()
+
+    for prefix in ('nao.', 'robot.', 'agent.'):
+        normalized = normalized.replace(prefix, '')
+
+    replacements = {
+        'right_wrist': 'RWristYaw',
+        'left_wrist': 'LWristYaw',
+        'right_elbow': 'RElbowRoll',
+        'left_elbow': 'LElbowRoll',
+        'right_shoulder': 'RShoulderPitch',
+        'left_shoulder': 'LShoulderPitch',
+        'neck_yaw': 'HeadYaw',
+        'neck_pitch': 'HeadPitch',
+    }
+    for src, dst in replacements.items():
+        normalized = normalized.replace(f'"{src}"', f'"{dst}"')
+        normalized = normalized.replace(f"'{src}'", f"'{dst}'")
+
+    lines = [line.rstrip() for line in normalized.splitlines()]
+    return '\n'.join(lines).strip()
 
 
 class VLMClient:
@@ -654,6 +423,7 @@ class VLMClient:
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
 
         semantic, code = parse_vlm_output(raw)
+        code = _normalize_generated_code(code)
         ok = bool(code) and bool(semantic)
         return VLMResponse(
             semantic_context=semantic,
@@ -677,24 +447,21 @@ class VLMClient:
             processor, model, kind = _load_local_model(self.model)
 
             if kind == 'qwen2_5_vl':
-                raw_label_text = _qwen_multi_image_classify(processor, model, images)
+                raw = _qwen_multi_image_generate(processor, model, images, self.system_prompt)
             else:
-                raw_label_text = _smolvlm_multi_image_classify(processor, model, images)
+                raw = _smolvlm_multi_image_generate(processor, model, images, self.system_prompt)
 
-            label = _extract_label(raw_label_text)
-            semantic, code = _compile_local_response(label)
-            raw = json.dumps(
-                {
-                    'backend': 'local',
-                    'model': self.model,
-                    'raw_label_text': raw_label_text,
-                    'observed_gesture': label,
-                    'response_label': semantic.get('response_label'),
-                },
-                ensure_ascii=False,
-                indent=2,
+            semantic, code = parse_vlm_output(raw)
+            code = _normalize_generated_code(code)
+            ok = bool(code) and bool(semantic)
+            return VLMResponse(
+                semantic_context=semantic,
+                python_code=code,
+                raw_text=raw,
+                elapsed_seconds=time.time() - t0,
+                ok=ok,
+                error=None if ok else 'parse_incomplete',
             )
-            return VLMResponse(semantic, code, raw, time.time() - t0, True)
         except Exception as exc:
             return VLMResponse({}, '', '', time.time() - t0, False, error=str(exc))
 
@@ -702,7 +469,7 @@ class VLMClient:
         t0 = time.time()
         try:
             rsp = requests.post(
-                config.LOCAL_VLM_SERVER_URL.rstrip('/') + '/classify_frames',
+                config.LOCAL_VLM_SERVER_URL.rstrip('/') + '/generate_from_frames',
                 json={
                     'frames_b64': list(frames_b64),
                     'model': self.model,
@@ -740,6 +507,6 @@ def parse_vlm_output(raw_text: str) -> Tuple[Dict[str, Any], str]:
 
     match_python = _PYTHON_RE.search(raw_text or '')
     if match_python:
-        code = match_python.group(1).strip()
+        code = textwrap.dedent(match_python.group(1)).strip()
 
     return semantic, code

@@ -35,8 +35,8 @@ def health():
     return jsonify({'ok': True, 'model': model})
 
 
-@app.post('/classify_frames')
-def classify_frames():
+@app.post('/generate_from_frames')
+def generate_from_frames():
     payload = request.get_json(force=True, silent=False) or {}
     frames_b64 = payload.get('frames_b64') or []
     model = payload.get('model')
