@@ -38,10 +38,28 @@ else:
         WEBCAM_SOURCE = str(_resolved)
 
 # FrameBuffer parameters
-FRAME_BUFFER_SECONDS = 2.0       # rolling window length
-FRAME_BUFFER_FPS = 10            # capture rate; also controls motion-score update rate
-VLM_FRAME_COUNT = 5              # number of frames sampled per VLM call
-VLM_WINDOW_SECONDS = 1.5         # conceptual span of the sampled sequence (for prompt text)
+FRAME_BUFFER_SECONDS = float(os.getenv('FRAME_BUFFER_SECONDS', '2.0'))
+FRAME_BUFFER_FPS = int(os.getenv('FRAME_BUFFER_FPS', '10'))
+VLM_FRAME_COUNT = int(os.getenv('VLM_FRAME_COUNT', '5'))
+VLM_WINDOW_SECONDS = float(os.getenv('VLM_WINDOW_SECONDS', '1.5'))
+FRAMEBUFFER_BACKEND = os.getenv('FRAMEBUFFER_BACKEND', 'auto').strip().lower()
+FRAMEBUFFER_WIDTH = int(os.getenv('FRAMEBUFFER_WIDTH', '1280'))
+FRAMEBUFFER_HEIGHT = int(os.getenv('FRAMEBUFFER_HEIGHT', '720'))
+
+# Controller run mode:
+#   'periodic' - original Phase-0 loop, kick VLM every fixed interval
+#   'oneshot'  - sample once from webcam/video, call VLM once, execute once, then exit
+#   'replay'   - skip VLM call, execute precomputed low-level code from file
+RUN_MODE = os.getenv('RUN_MODE', 'periodic').strip().lower()
+REPLAY_CODE_PATH = os.getenv('REPLAY_CODE_PATH', '').strip()
+REPLAY_START_DELAY = float(os.getenv('REPLAY_START_DELAY', '0.0'))
+ONE_SHOT_BUFFER_TIMEOUT = float(os.getenv('ONE_SHOT_BUFFER_TIMEOUT', '8.0'))
+ONE_SHOT_VLM_TIMEOUT = float(os.getenv('ONE_SHOT_VLM_TIMEOUT', '90.0'))
+ONE_SHOT_EXIT_AFTER_EXECUTE = os.getenv('ONE_SHOT_EXIT_AFTER_EXECUTE', '1').strip().lower() not in {
+    '0', 'false', 'no'
+}
+ONE_SHOT_VIDEO_SETTLE_SECONDS = float(os.getenv('ONE_SHOT_VIDEO_SETTLE_SECONDS', '0.0'))
+ONE_SHOT_VIDEO_CAPTURE_MODE = os.getenv('ONE_SHOT_VIDEO_CAPTURE_MODE', 'recent').strip().lower()
 
 # ---------------------------------------------------------------------------
 # VLM trigger (state-aware)
@@ -55,10 +73,19 @@ IDLE_SAFETY_TIMEOUT = 30.0       # backstop trigger when IDLE for too long (robu
 # ---------------------------------------------------------------------------
 LLM_API_KEY = os.getenv('llm_api_key', '')
 LLM_BASE_URL = os.getenv('base_url', '')
+VLM_BACKEND = os.getenv('VLM_BACKEND', 'auto').strip().lower()
 VLM_MODEL = os.getenv('VLM_MODEL', 'gpt-4o')
-VLM_MAX_TOKENS = 500
+VLM_MAX_TOKENS = int(os.getenv('VLM_MAX_TOKENS', '700'))
 VLM_TEMPERATURE = 0.2
 VLM_IMAGE_DETAIL = 'low'         # 'low' ≈ 85 tokens/image, 'high' ≈ 1100+ tokens
+VLM_SCENARIO_HINT = os.getenv('VLM_SCENARIO_HINT', '').strip()
+LOCAL_VLM_MODEL = os.getenv('LOCAL_VLM_MODEL', 'HuggingFaceTB/SmolVLM2-500M-Video-Instruct').strip()
+LOCAL_VLM_LOAD_IN_4BIT = os.getenv('LOCAL_VLM_LOAD_IN_4BIT', 'auto').strip().lower()
+LOCAL_VLM_SERVER_URL = os.getenv('LOCAL_VLM_SERVER_URL', '').strip()
+LOCAL_VLM_NUM_CANDIDATES = max(1, int(os.getenv('LOCAL_VLM_NUM_CANDIDATES', '3')))
+LOCAL_VLM_TEMPERATURE = float(os.getenv('LOCAL_VLM_TEMPERATURE', '0.65'))
+LOCAL_VLM_TOP_P = float(os.getenv('LOCAL_VLM_TOP_P', '0.92'))
+LOCAL_VLM_DEBUG = os.getenv('LOCAL_VLM_DEBUG', '1').strip().lower() not in {'0', 'false', 'no'}
 
 # ---------------------------------------------------------------------------
 # Robot control
@@ -114,3 +141,5 @@ def find_urdf_path():
 REPO_ROOT = _REPO_ROOT
 VIDEOS_DIR = _REPO_ROOT / 'videos'
 LOG_DIR = _REPO_ROOT / 'logs'
+ARTIFACTS_DIR = _REPO_ROOT / 'artifacts' / 'oneshot'
+DEMO_RECORDINGS_DIR = _REPO_ROOT / 'artifacts' / 'screen_recordings'

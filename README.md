@@ -47,3 +47,34 @@ To allow the Python controller to execute macroscopic navigation (like sliding/w
 
 ### 3. Run the Controller
 Ensure the `controller` field of the NAO node is set to your Python script (e.g., `nao_vlm_test`). Reset (⏪) and Play (▶️) the simulation. The Python controller will automatically start the VLM API polling test.
+
+### 4. Real-time Webcam Mode
+The default target workflow is real-time interaction:
+
+- `INPUT_MODE=webcam`
+- `WEBCAM_SOURCE=0`
+- `RUN_MODE=periodic`
+- `FRAMEBUFFER_BACKEND=auto`
+
+This means the controller continuously samples recent frames from the local webcam,
+queries the VLM with a general control-contract prompt, and executes the returned
+robot motion sequence.
+
+### 5. One-shot Example Video Demo
+The recorded example video is only for debugging. To run a single-turn demo from
+`example_video/webcam_20260425_072825.mp4`:
+
+1. Create the conda environment:
+```bash
+conda env create -f environment.yml
+```
+2. Copy `.env.debug.example-video` to `.env`.
+3. Point `nao_VLM/controllers/nao_vlm_test/runtime.ini` to the conda Python interpreter.
+4. Launch Webots and run the `nao_vlm_test` controller.
+
+In `oneshot` mode, the controller samples a short frame sequence from the video,
+calls the VLM once, executes the returned Python primitive sequence once, saves
+artifacts under `artifacts/oneshot/`, and exits.
+
+### 6. 协作与日常使用
+如果你是协作者，先看 `COLLABORATOR_GUIDE.md`。里面包括当前阶段、常用脚本、以及只推送 `artifacts/screen_recordings_matched/` 的约定。
