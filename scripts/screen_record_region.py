@@ -19,6 +19,9 @@ def parse_args():
     parser.add_argument('--seconds', type=float, required=True)
     parser.add_argument('--fps', type=float, default=25.0)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--black-mean-threshold', type=float, default=4.0)
+    parser.add_argument('--black-std-threshold', type=float, default=3.0)
+    parser.add_argument('--max-consecutive-black-frames', type=int, default=40)
     return parser.parse_args()
 
 
@@ -44,16 +47,42 @@ def main():
     }
     frame_interval = 1.0 / max(1.0, float(args.fps))
     deadline = time.time() + max(0.1, float(args.seconds))
+    consecutive_black_frames = 0
 
-    with mss.mss() as sct:
-        while time.time() < deadline:
-            loop_start = time.time()
-            shot = np.array(sct.grab(region), copy=False)
-            frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
-            writer.write(frame)
-            sleep_for = frame_interval - (time.time() - loop_start)
-            if sleep_for > 0:
-                time.sleep(sleep_for)
+    try:
+        with mss.mss() as sct:
+            while time.time() < deadline:
+                loop_start = time.time()
+                shot = np.array(sct.grab(region), copy=False)
+                frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                mean_luma = float(gray.mean())
+                std_luma = float(gray.std())
+
+                if (
+                    mean_luma <= float(args.black_mean_threshold)
+                    and std_luma <= float(args.black_std_threshold)
+                ):
+                    consecutive_black_frames += 1
+                else:
+                    consecutive_black_frames = 0
+
+                if consecutive_black_frames >= int(args.max_consecutive_black_frames):
+                    raise RuntimeError(
+                        '检测到连续黑屏帧，桌面可能已休眠、锁屏或显示输出关闭，停止录制。'
+                    )
+
+                writer.write(frame)
+                sleep_for = frame_interval - (time.time() - loop_start)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+    except Exception:
+        writer.release()
+        try:
+            args.output.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
     writer.release()
 

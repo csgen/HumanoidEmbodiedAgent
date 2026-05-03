@@ -129,7 +129,23 @@ class NaoVlmAPI:
         }
         self.q_current = pin.neutral(self.model)
         self.current_posture = 'stand'
-        self._aborted = False   # set to True when robot.step returns -1
+        self._aborted = False
+
+    def _normalize_arm_side(self, side: str) -> str:
+        if not isinstance(side, str):
+            return side
+        normalized = side.strip().lower()
+        alias_map = {
+            'l': 'left',
+            'left': 'left',
+            'left_arm': 'left',
+            'left_hand': 'left',
+            'r': 'right',
+            'right': 'right',
+            'right_arm': 'right',
+            'right_hand': 'right',
+        }
+        return alias_map.get(normalized, side)
 
     # ------------------------------------------------------------------ internals
 
@@ -289,6 +305,7 @@ class NaoVlmAPI:
 
     def move_arm_ik(self, side: str, xyz, duration: float,
                     orientation=None) -> str:
+        side = self._normalize_arm_side(side)
         if side not in ('left', 'right'):
             return f'ERROR: invalid side {side!r}'
         try:
@@ -371,6 +388,7 @@ class NaoVlmAPI:
 
     def set_hand(self, side: str, openness: float, duration: float,
                  trajectory: str = 'cubic') -> str:
+        side = self._normalize_arm_side(side)
         if side not in ('left', 'right'):
             return f'ERROR: invalid side {side!r}'
         prefix = 'L' if side == 'left' else 'R'
@@ -402,19 +420,22 @@ class NaoVlmAPI:
         dur = max(self.timestep / 1000.0, float(duration))
         steps = max(1, int(round(dur * 1000.0 / self.timestep)))
         hy = self.motors.get('HeadYaw')
+        hp = self.motors.get('HeadPitch')
         lsp = self.motors.get('LShoulderPitch')
         rsp = self.motors.get('RShoulderPitch')
         for i in range(1, steps + 1):
             t = (i / steps) * dur
             if hy is not None:
-                hy.setPosition(self._clip_to_motor_limits(hy, 0.08 * math.sin(0.3 * t)))
+                hy.setPosition(self._clip_to_motor_limits(hy, 0.04 * math.sin(0.35 * t)))
+            if hp is not None:
+                hp.setPosition(self._clip_to_motor_limits(hp, 0.03 * math.sin(0.28 * t)))
             # Anti-phase subtle breathing on shoulders
             if lsp is not None:
                 lsp.setPosition(self._clip_to_motor_limits(
-                    lsp, 1.5 + 0.03 * math.sin(0.5 * t)))
+                    lsp, 1.45 + 0.015 * math.sin(0.45 * t)))
             if rsp is not None:
                 rsp.setPosition(self._clip_to_motor_limits(
-                    rsp, 1.5 + 0.03 * math.sin(0.5 * t + math.pi)))
+                    rsp, 1.45 + 0.015 * math.sin(0.45 * t + math.pi)))
             if not self._step():
                 return 'ABORTED'
         return f'OK idle {duration:.2f}s'
@@ -506,6 +527,19 @@ class VLMWorker:
         self.total_calls += 1
         t = threading.Thread(
             target=self._run, args=(frames,), name='VLMWorker', daemon=True
+        )
+        t.start()
+        return True
+
+    def kick_with_frames(self, frames: List[str]) -> bool:
+        if self._in_flight.is_set():
+            return False
+        if not frames:
+            return False
+        self._in_flight.set()
+        self.total_calls += 1
+        t = threading.Thread(
+            target=self._run, args=(list(frames),), name='VLMWorker', daemon=True
         )
         t.start()
         return True
@@ -819,6 +853,39 @@ def _run_oneshot_demo(
         print('[oneshot] done; exiting controller.')
 
 
+def _run_replay_demo(robot: Supervisor, timestep: int, vlm_api: NaoVlmAPI, executor: SandboxExecutor) -> None:
+    code_path = Path(config.REPLAY_CODE_PATH).expanduser()
+    if not code_path.is_absolute():
+        code_path = (Path(__file__).resolve().parent.parent.parent.parent / code_path).resolve()
+    if not code_path.exists():
+        print(f'[replay] ERROR: code file not found: {code_path}')
+        return
+
+    code = code_path.read_text(encoding='utf-8')
+    if not code.strip():
+        print(f'[replay] ERROR: code file is empty: {code_path}')
+        return
+
+    if config.REPLAY_START_DELAY > 0.0:
+        print(f'[replay] waiting {config.REPLAY_START_DELAY:.2f}s before execution...')
+        steps = max(1, int(round(config.REPLAY_START_DELAY * 1000.0 / timestep)))
+        for _ in range(steps):
+            if robot.step(timestep) == -1:
+                print('[replay] simulation ended during start delay.')
+                return
+            vlm_api._sync_sensors()
+
+    print(f'[replay] executing precomputed code from: {code_path}')
+    print(f'[replay] code:\n{code}\n')
+    result = executor.run(code)
+    if result.ok:
+        print(f'[replay] execution OK in {result.elapsed_seconds:.2f}s')
+    else:
+        print(f'[replay] execution FAILED: {result.error}')
+        if result.traceback:
+            print(result.traceback)
+
+
 def main():
     print('\n' + '=' * 60)
     print(' NAO VLM Embodied Controller')
@@ -880,11 +947,32 @@ def main():
     # 6. Sandbox executor
     executor = SandboxExecutor()
     executor.set_joint_limits(vlm_api.get_joint_limits())
+
+    def operate_gripper(side: str, action: str) -> str:
+        normalized_side = vlm_api._normalize_arm_side(side)
+        normalized_action = str(action).strip().lower()
+        if normalized_action not in {'open', 'close'}:
+            return f'ERROR: invalid gripper action {action!r}'
+        openness = 1.0 if normalized_action == 'open' else 0.0
+        return vlm_api.set_hand(normalized_side, openness, duration=0.25, trajectory='cubic')
+
+    def move_head(yaw: float, pitch: float, duration: float = 0.2, trajectory: str = 'min_jerk') -> str:
+        return vlm_api.move_joints(
+            {
+                'HeadYaw': float(yaw),
+                'HeadPitch': float(pitch),
+            },
+            duration=float(duration),
+            trajectory=trajectory,
+        )
+
     executor.register_many({
         'move_joint': vlm_api.move_joint,
         'move_joints': vlm_api.move_joints,
         'move_arm_ik': vlm_api.move_arm_ik,
+        'move_head': move_head,
         'set_hand': vlm_api.set_hand,
+        'operate_gripper': operate_gripper,
         'oscillate_joint': vlm_api.oscillate_joint,
         'hold': vlm_api.hold,
         'idle': vlm_api.idle,
@@ -892,6 +980,15 @@ def main():
     print(f'[init] sandbox exposes: {executor.registered_names}')
 
     fallback = FallbackPolicy(idle_fn=vlm_api.idle)
+
+    if config.RUN_MODE == 'replay':
+        print('[init] run mode: replay')
+        try:
+            _run_replay_demo(robot, timestep, vlm_api, executor)
+        finally:
+            if buffer is not None:
+                buffer.stop()
+        return
 
     if config.RUN_MODE == 'oneshot':
         print('[init] run mode: oneshot')
@@ -927,6 +1024,7 @@ def main():
 
     # 8. Main loop
     step_count = 0
+    last_trigger_frames: List[str] = []
     print(f'[init] main loop entering. State-aware trigger active. '
           f'Press Ctrl-C or stop Webots to exit.\n')
 
@@ -948,6 +1046,7 @@ def main():
             if not worker.in_flight:
                 reason = trigger.consider_trigger()
                 if reason is not None and worker.kick():
+                    last_trigger_frames = buffer.sample_recent(config.VLM_FRAME_COUNT) if buffer is not None else []
                     trigger.confirm_fire(reason)
                     trigger.mark_executing()
                     buf_stats = buffer.stats() if buffer else {}
@@ -972,13 +1071,23 @@ def main():
                         print(f'[VLM] exec FAILED: {result.error}')
                         if result.traceback:
                             print(result.traceback)
-                        fallback.handle_failure(f'exec_failed:{result.error}')
+                        decision = fallback.handle_failure(f'exec_failed:{result.error}')
+                        if decision.action == 'retry' and worker is not None and last_trigger_frames:
+                            print(f'[fallback] tier A retry after exec failure: {decision.reason}')
+                            if worker.kick_with_frames(last_trigger_frames):
+                                trigger.mark_executing()
+                                continue
                     # Whether exec succeeded or failed, open the post-action
                     # observation window so we see the human's reaction.
                     trigger.mark_action_done()
                 else:
                     print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
-                    fallback.handle_failure(f'call_failed:{rsp.error}')
+                    decision = fallback.handle_failure(f'call_failed:{rsp.error}')
+                    if decision.action == 'retry' and worker is not None and last_trigger_frames:
+                        print(f'[fallback] tier A retry after call failure: {decision.reason}')
+                        if worker.kick_with_frames(last_trigger_frames):
+                            trigger.mark_executing()
+                            continue
                     trigger.mark_idle()
 
     # Shutdown

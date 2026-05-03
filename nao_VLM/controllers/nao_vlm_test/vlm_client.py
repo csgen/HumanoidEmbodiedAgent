@@ -120,6 +120,10 @@ or "greet()" function. You must COMPOSE motion from these primitives:
   when the frames support a richer upper-body response.
 - Use very small motion when the clip evidence is weak; use larger but still smooth
   motion only when the sequence clearly supports it.
+- If motion is concentrated on one side of the image, prefer one dominant arm
+  or a head-led response rather than moving both arms.
+- For low-motion or static clips, do not output a zero-angle no-op posture;
+  prefer a small but readable head attention response plus a brief hold or idle.
 
 # Composition guidance
 - Prefer short sequences of 2-5 primitive calls.
@@ -129,6 +133,18 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - Use `oscillate_joint(...)` only when the observed motion itself appears repeated
   across multiple frames.
 - Return smoothly toward a calm upper-body posture after a dynamic motion.
+- Every primitive call should have a visible purpose; avoid repeating the exact
+  same call twice in a row.
+- Avoid mirrored both-arm responses unless the frames clearly show a bilateral
+  interaction. Most natural pet-like responses use head plus one dominant arm.
+- If you use `move_joints(...)`, prefer coordinated shoulder/elbow/head changes
+  that form a readable pose rather than tiny no-op joint changes.
+- A response that only returns one elbow to its mechanical limit is usually too
+  generic unless the frames strongly justify it.
+- Avoid driving shoulder pitch, shoulder roll, elbow roll, or head pitch to the
+  exact joint extremes; leave visible comfort margin.
+- For pet-like responses, prefer one readable gesture with a short settle rather
+  than several large disjoint posture changes.
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
@@ -178,7 +194,9 @@ _LOCAL_USER_PROMPT = (
     "head, arm, wrist, and hand motion only. Do not default to the same motion "
     "pattern for every clip. Infer laterality, tempo, activity level, and "
     "dominant direction from the frames, then let those observations change the "
-    "generated control program."
+    "generated control program. If the visible motion is lateralized, prefer one "
+    "dominant arm or a head-led response, and keep the opposite arm mostly quiet "
+    "unless the frames clearly justify bilateral motion."
 )
 
 _LOCAL_REPAIR_PROMPT_TEMPLATE = """The previous robot-control program was not acceptable.
@@ -222,6 +240,14 @@ Rules:
 - Avoid a wrist-only oscillation unless the video truly supports it.
 - Prefer a short coordinated combination such as head+arm, head+hand, or arm+hand over a single-joint response when the frames support it.
 - If the clip evidence is weak, stay small and calm rather than inventing a dramatic response.
+- For low-motion or static clips, avoid zero-angle no-op poses; use a small readable head attention cue instead.
+- Do not repeat the exact same primitive call twice in a row.
+- Avoid symmetric both-arm poses unless the video clearly supports bilateral motion.
+- If the visible motion is lateralized, keep the non-dominant arm mostly quiet instead of inventing a support pose on the other side.
+- Avoid near-zero or no-op joint targets that create motion without readable intent.
+- Avoid joint-extreme postures that look tense or mechanically forced.
+- For low-motion or static clips, prefer head-only attention cues; avoid inventing arm poses unless the frames clearly justify them.
+- End the response with a short `hold(...)` or `idle(...)` after the main motion so the behavior settles naturally.
 
 Previous semantic JSON:
 {semantic_json}
@@ -246,6 +272,12 @@ Selection rules:
 - Reject candidates that look generic, repetitive, or unrelated to the observed motion.
 - Reject candidates that use walking, lower-body joints, or obviously unsafe motion.
 - If more than one candidate is plausible, choose the one with the clearest social appropriateness.
+- Reject candidates that repeat the exact same call twice in a row.
+- Reject candidates that move both arms symmetrically without clear evidence.
+- Reject candidates whose motion is technically valid but visually unreadable or no-op.
+- If the motion evidence is laterally asymmetric, prefer candidates with one
+  dominant arm instead of bilateral responses.
+- Reject candidates that add non-dominant-arm support poses without clear evidence.
 
 Cheap motion summary from the clip:
 {motion_summary}
@@ -348,6 +380,8 @@ def _infer_visual_motion_summary(frames_b64: Sequence[str]) -> Dict[str, Any]:
     centroid_dx = 0.0
     centroid_dy = 0.0
     centroid_samples = 0
+    left_energy_total = 0.0
+    right_energy_total = 0.0
 
     prev_cx = None
     prev_cy = None
@@ -357,6 +391,9 @@ def _infer_visual_motion_summary(frames_b64: Sequence[str]) -> Dict[str, Any]:
         total_energy += energy
 
         h, w = diff.shape[:2]
+        half_w = max(1, w // 2)
+        left_energy_total += float(diff[:, :half_w].mean())
+        right_energy_total += float(diff[:, half_w:].mean())
         ys, xs = np.mgrid[0:h, 0:w]
         weight = diff + 1e-6
         mass = float(weight.sum())
@@ -405,6 +442,15 @@ def _infer_visual_motion_summary(frames_b64: Sequence[str]) -> Dict[str, Any]:
     else:
         activity = 'high'
 
+    left_energy = left_energy_total / max(1, len(frames) - 1)
+    right_energy = right_energy_total / max(1, len(frames) - 1)
+    if left_energy > right_energy * 1.18:
+        active_side = 'left_image'
+    elif right_energy > left_energy * 1.18:
+        active_side = 'right_image'
+    else:
+        active_side = 'balanced'
+
     return {
         'frame_count': len(frames_b64),
         'motion_energy': round(mean_energy, 4),
@@ -412,6 +458,9 @@ def _infer_visual_motion_summary(frames_b64: Sequence[str]) -> Dict[str, Any]:
         'lateral_bias': lateral_bias,
         'vertical_bias': vertical_bias,
         'activity_level': activity,
+        'active_side': active_side,
+        'left_energy': round(left_energy, 4),
+        'right_energy': round(right_energy, 4),
     }
 
 
@@ -441,19 +490,69 @@ def _parse_code_calls(code: str) -> List[Tuple[str, int]]:
     return calls
 
 
+def _normalize_arm_side_token(side: Any) -> Optional[str]:
+    if not isinstance(side, str):
+        return None
+    normalized = side.strip().lower()
+    alias_map = {
+        'l': 'left',
+        'left': 'left',
+        'left_arm': 'left',
+        'left_hand': 'left',
+        'r': 'right',
+        'right': 'right',
+        'right_arm': 'right',
+        'right_hand': 'right',
+    }
+    return alias_map.get(normalized)
+
+
 def _build_static_validator(joint_limits: Dict[str, Tuple[float, float]]) -> SandboxExecutor:
     executor = SandboxExecutor()
+
+    def move_joint(name: str, angle: float, duration: float, trajectory: str = 'cubic'):
+        return None
+
+    def move_joints(joint_angles: dict, duration: float, trajectory: str = 'cubic'):
+        return None
+
+    def move_arm_ik(side: str, xyz, duration: float, orientation=None):
+        return None
+
+    def move_head(yaw: float, pitch: float, duration: float = 0.2, trajectory: str = 'min_jerk'):
+        return None
+
+    def set_hand(side: str, openness: float, duration: float, trajectory: str = 'cubic'):
+        return None
+
+    def oscillate_joint(name: str, center: float, amplitude: float, frequency: float, duration: float, decay: float = 0.0):
+        return None
+
+    def hold(duration: float):
+        return None
+
+    def idle(duration: float):
+        return None
+
     executor.register_many({
-        'move_joint': lambda *a, **k: None,
-        'move_joints': lambda *a, **k: None,
-        'move_arm_ik': lambda *a, **k: None,
-        'set_hand': lambda *a, **k: None,
-        'oscillate_joint': lambda *a, **k: None,
-        'hold': lambda *a, **k: None,
-        'idle': lambda *a, **k: None,
+        'move_joint': move_joint,
+        'move_joints': move_joints,
+        'move_arm_ik': move_arm_ik,
+        'move_head': move_head,
+        'set_hand': set_hand,
+        'oscillate_joint': oscillate_joint,
+        'hold': hold,
+        'idle': idle,
     })
     executor.set_joint_limits(joint_limits)
     return executor
+
+
+def _runtime_signature_ok(executor: SandboxExecutor, code: str) -> bool:
+    if not code or not code.strip():
+        return False
+    result = executor.run(code)
+    return bool(result.ok)
 
 
 def _candidate_has_minimal_structure(semantic: Dict[str, Any], code: str) -> bool:
@@ -461,6 +560,429 @@ def _candidate_has_minimal_structure(semantic: Dict[str, Any], code: str) -> boo
         return False
     calls = _parse_code_calls(code)
     return bool(calls)
+
+
+def _non_comment_code_lines(code: str) -> List[str]:
+    return [
+        line.strip()
+        for line in code.splitlines()
+        if line.strip() and not line.strip().startswith('#')
+    ]
+
+
+def _literal_or_none(node: Optional[ast.AST]):
+    if node is None:
+        return None
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        return None
+
+
+def _parse_top_level_calls(code: str) -> List[Dict[str, Any]]:
+    try:
+        tree = ast.parse(code)
+    except Exception:
+        return []
+
+    calls: List[Dict[str, Any]] = []
+    for stmt in tree.body:
+        if not isinstance(stmt, ast.Expr) or not isinstance(stmt.value, ast.Call):
+            continue
+        call = stmt.value
+        if isinstance(call.func, ast.Name):
+            fn_name = call.func.id
+        elif isinstance(call.func, ast.Attribute):
+            fn_name = call.func.attr
+        else:
+            continue
+        calls.append({
+            'name': fn_name,
+            'args': [_literal_or_none(arg) for arg in call.args],
+            'kwargs': {kw.arg: _literal_or_none(kw.value) for kw in call.keywords if kw.arg},
+        })
+    return calls
+
+
+def _has_consecutive_duplicate_calls(code: str) -> bool:
+    lines = _non_comment_code_lines(code)
+    return any(prev == cur for prev, cur in zip(lines, lines[1:]))
+
+
+def _call_duration(call: Dict[str, Any]) -> Optional[float]:
+    if not isinstance(call, dict):
+        return None
+    args = call.get('args') or []
+    kwargs = call.get('kwargs') or {}
+    fn_name = call.get('name')
+    duration = None
+    if fn_name in {'move_joint', 'move_joints', 'move_arm_ik', 'set_hand'}:
+        if len(args) >= 3 and isinstance(args[2], (int, float)):
+            duration = float(args[2])
+        elif isinstance(kwargs.get('duration'), (int, float)):
+            duration = float(kwargs.get('duration'))
+        elif fn_name == 'move_joints' and len(args) >= 2 and isinstance(args[1], (int, float)):
+            duration = float(args[1])
+        elif fn_name == 'set_hand' and len(args) >= 2 and isinstance(args[1], (int, float)):
+            duration = float(args[1])
+    elif fn_name in {'hold', 'idle'}:
+        if args and isinstance(args[0], (int, float)):
+            duration = float(args[0])
+        elif isinstance(kwargs.get('duration'), (int, float)):
+            duration = float(kwargs.get('duration'))
+    elif fn_name == 'oscillate_joint':
+        if len(args) >= 5 and isinstance(args[4], (int, float)):
+            duration = float(args[4])
+        elif isinstance(kwargs.get('duration'), (int, float)):
+            duration = float(kwargs.get('duration'))
+    return duration
+
+
+def _has_too_many_micro_steps(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    micro = 0
+    for call in calls:
+        duration = _call_duration(call)
+        if duration is not None and duration <= 0.15:
+            micro += 1
+    return micro >= 3
+
+
+def _has_static_clip_with_arm_motion(summary: Dict[str, Any], code: str) -> bool:
+    activity = str((summary or {}).get('activity_level') or 'low').lower()
+    dominant_axis = str((summary or {}).get('dominant_axis') or 'static').lower()
+    if activity != 'low':
+        return False
+    calls = _parse_top_level_calls(code)
+    for call in calls:
+        fn_name = call.get('name')
+        if fn_name in {'move_arm_ik', 'set_hand', 'oscillate_joint'}:
+            return True
+        if fn_name not in {'move_joint', 'move_joints'}:
+            continue
+        joint_names: List[str] = []
+        if fn_name == 'move_joint':
+            joint_name = call['args'][0] if call['args'] else call['kwargs'].get('name')
+            if isinstance(joint_name, str):
+                joint_names.append(joint_name)
+        else:
+            joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+            if isinstance(joint_angles, dict):
+                joint_names.extend(name for name in joint_angles if isinstance(name, str))
+        if any((name.startswith('L') or name.startswith('R')) and not name.startswith('Head') for name in joint_names):
+            return True
+    return False
+
+
+def _has_no_settle_after_dynamic_motion(summary: Dict[str, Any], code: str) -> bool:
+    activity = str((summary or {}).get('activity_level') or 'low').lower()
+    if activity not in {'medium', 'high'}:
+        return False
+    calls = _parse_top_level_calls(code)
+    if len(calls) < 2:
+        return False
+    tail = calls[-1].get('name')
+    if tail in {'hold', 'idle'}:
+        return False
+    return any(call.get('name') in {'move_arm_ik', 'move_joint', 'move_joints', 'set_hand'} for call in calls)
+
+
+def _is_mirrored_arm_target(xyz_a: Any, xyz_b: Any) -> bool:
+    if not isinstance(xyz_a, (list, tuple)) or not isinstance(xyz_b, (list, tuple)):
+        return False
+    if len(xyz_a) != 3 or len(xyz_b) != 3:
+        return False
+    try:
+        ax, ay, az = [float(v) for v in xyz_a]
+        bx, by, bz = [float(v) for v in xyz_b]
+    except Exception:
+        return False
+    return (
+        abs(ax - bx) <= 0.06
+        and abs(az - bz) <= 0.06
+        and abs(ay + by) <= 0.08
+        and abs(abs(ay) - abs(by)) <= 0.06
+    )
+
+
+def _has_symmetric_dual_arm_ik(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    move_arm_calls = [call for call in calls if call.get('name') == 'move_arm_ik']
+    if len(move_arm_calls) < 2:
+        return False
+
+    for first, second in zip(move_arm_calls, move_arm_calls[1:]):
+        side_a = first['args'][0] if len(first['args']) >= 1 else first['kwargs'].get('side')
+        side_b = second['args'][0] if len(second['args']) >= 1 else second['kwargs'].get('side')
+        xyz_a = first['args'][1] if len(first['args']) >= 2 else first['kwargs'].get('xyz')
+        xyz_b = second['args'][1] if len(second['args']) >= 2 else second['kwargs'].get('xyz')
+        dur_a = first['args'][2] if len(first['args']) >= 3 else first['kwargs'].get('duration')
+        dur_b = second['args'][2] if len(second['args']) >= 3 else second['kwargs'].get('duration')
+
+        if {side_a, side_b} != {'left', 'right'}:
+            continue
+        if not _is_mirrored_arm_target(xyz_a, xyz_b):
+            continue
+        if isinstance(dur_a, (int, float)) and isinstance(dur_b, (int, float)) and abs(float(dur_a) - float(dur_b)) > 0.25:
+            continue
+        return True
+    return False
+
+
+def _has_mirrored_dual_arm_posture(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    for call in calls:
+        if call.get('name') != 'move_joints':
+            continue
+        joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+        if not isinstance(joint_angles, dict) or not joint_angles:
+            continue
+        joint_names = [name for name in joint_angles if isinstance(name, str)]
+        if not joint_names or any(name.startswith('Head') for name in joint_names):
+            continue
+
+        left = {name[1:]: value for name, value in joint_angles.items() if isinstance(name, str) and name.startswith('L')}
+        right = {name[1:]: value for name, value in joint_angles.items() if isinstance(name, str) and name.startswith('R')}
+        shared = sorted(set(left) & set(right))
+        if not shared:
+            continue
+
+        mirrored_pairs = 0
+        for suffix in shared:
+            lv = left[suffix]
+            rv = right[suffix]
+            if not isinstance(lv, (int, float)) or not isinstance(rv, (int, float)):
+                continue
+            if abs(abs(float(lv)) - abs(float(rv))) <= 0.12:
+                mirrored_pairs += 1
+
+        if mirrored_pairs >= 1 and len(joint_names) <= 4:
+            return True
+    return False
+
+
+def _uses_only_distal_arm_joints(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    joint_names: List[str] = []
+    for call in calls:
+        if call.get('name') == 'move_joint':
+            joint_name = call['args'][0] if call['args'] else call['kwargs'].get('name')
+            if isinstance(joint_name, str):
+                joint_names.append(joint_name)
+        elif call.get('name') == 'move_joints':
+            joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+            if isinstance(joint_angles, dict):
+                joint_names.extend(name for name in joint_angles if isinstance(name, str))
+
+    if not joint_names:
+        return False
+    allowed_suffixes = {'ElbowRoll', 'ElbowYaw', 'WristYaw'}
+    for joint_name in joint_names:
+        if joint_name.startswith('Head'):
+            return False
+        suffix = joint_name[1:] if joint_name[:1] in {'L', 'R'} else joint_name
+        if suffix not in allowed_suffixes:
+            return False
+    return True
+
+
+def _has_unreadably_small_posture(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    if not calls:
+        return False
+    saw_joint_posture = False
+    for call in calls:
+        fn_name = call.get('name')
+        if fn_name in {'move_arm_ik', 'set_hand', 'oscillate_joint'}:
+            return False
+        if fn_name not in {'move_joint', 'move_joints', 'hold', 'idle'}:
+            continue
+        if fn_name == 'move_joint':
+            angle = call['args'][1] if len(call.get('args') or []) >= 2 else call.get('kwargs', {}).get('angle')
+            if not isinstance(angle, (int, float)) or abs(float(angle)) > 0.08:
+                return False
+            saw_joint_posture = True
+        elif fn_name == 'move_joints':
+            joint_angles = call['args'][0] if call.get('args') else call.get('kwargs', {}).get('joint_angles')
+            if not isinstance(joint_angles, dict) or not joint_angles:
+                return False
+            numeric_values = [float(v) for v in joint_angles.values() if isinstance(v, (int, float))]
+            if not numeric_values or any(abs(v) > 0.08 for v in numeric_values):
+                return False
+            saw_joint_posture = True
+    return saw_joint_posture and len(_non_comment_code_lines(code)) <= 3
+
+
+def _has_hand_without_postural_anchor(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    has_hand = False
+    has_head = False
+    has_shoulder_or_ik = False
+    for call in calls:
+        fn_name = call.get('name')
+        if fn_name == 'move_arm_ik':
+            has_shoulder_or_ik = True
+            continue
+        if fn_name == 'set_hand':
+            has_hand = True
+            continue
+        if fn_name not in {'move_joint', 'move_joints', 'oscillate_joint'}:
+            continue
+
+        joint_names: List[str] = []
+        if fn_name in {'move_joint', 'oscillate_joint'}:
+            joint_name = call['args'][0] if call['args'] else call['kwargs'].get('name')
+            if isinstance(joint_name, str):
+                joint_names.append(joint_name)
+        else:
+            joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+            if isinstance(joint_angles, dict):
+                joint_names.extend(name for name in joint_angles if isinstance(name, str))
+
+        for joint_name in joint_names:
+            if joint_name.startswith('Head'):
+                has_head = True
+            suffix = joint_name[1:] if joint_name[:1] in {'L', 'R'} else joint_name
+            if suffix.startswith('Shoulder'):
+                has_shoulder_or_ik = True
+
+    return has_hand and not has_head and not has_shoulder_or_ik
+
+
+def _has_readable_head_or_single_arm_focus(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    for call in calls:
+        if call.get('name') == 'move_arm_ik':
+            return True
+        if call.get('name') not in {'move_joint', 'move_joints'}:
+            continue
+
+        joint_names: List[str] = []
+        if call.get('name') == 'move_joint':
+            joint_name = call['args'][0] if call['args'] else call['kwargs'].get('name')
+            if isinstance(joint_name, str):
+                joint_names.append(joint_name)
+        else:
+            joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+            if isinstance(joint_angles, dict):
+                joint_names.extend(name for name in joint_angles if isinstance(name, str))
+
+        has_head = any(name.startswith('Head') for name in joint_names)
+        left_count = sum(1 for name in joint_names if name.startswith('L'))
+        right_count = sum(1 for name in joint_names if name.startswith('R'))
+        if has_head:
+            return True
+        if left_count >= 2 and right_count == 0:
+            return True
+        if right_count >= 2 and left_count == 0:
+            return True
+    return False
+
+
+def _upper_body_activity_stats(code: str) -> Dict[str, int]:
+    calls = _parse_top_level_calls(code)
+    stats = {
+        'left_score': 0,
+        'right_score': 0,
+        'left_calls': 0,
+        'right_calls': 0,
+        'head_calls': 0,
+    }
+    for call in calls:
+        fn_name = call.get('name')
+        if fn_name == 'move_arm_ik':
+            side = _normalize_arm_side_token(call['args'][0] if call['args'] else call['kwargs'].get('side'))
+            if side == 'left':
+                stats['left_score'] += 3
+                stats['left_calls'] += 1
+            elif side == 'right':
+                stats['right_score'] += 3
+                stats['right_calls'] += 1
+            continue
+
+        joint_names: List[str] = []
+        if fn_name in {'move_joint', 'oscillate_joint'}:
+            joint_name = call['args'][0] if call['args'] else call['kwargs'].get('name')
+            if isinstance(joint_name, str):
+                joint_names.append(joint_name)
+        elif fn_name == 'move_joints':
+            joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+            if isinstance(joint_angles, dict):
+                joint_names.extend(name for name in joint_angles if isinstance(name, str))
+        elif fn_name == 'set_hand':
+            side = _normalize_arm_side_token(call['args'][0] if call['args'] else call['kwargs'].get('side'))
+            if side == 'left':
+                stats['left_score'] += 1
+                stats['left_calls'] += 1
+            elif side == 'right':
+                stats['right_score'] += 1
+                stats['right_calls'] += 1
+            continue
+        else:
+            continue
+
+        saw_left = False
+        saw_right = False
+        saw_head = False
+        for joint_name in joint_names:
+            if joint_name.startswith('Head'):
+                saw_head = True
+            elif joint_name.startswith('L'):
+                saw_left = True
+                stats['left_score'] += 1
+            elif joint_name.startswith('R'):
+                saw_right = True
+                stats['right_score'] += 1
+        if saw_left:
+            stats['left_calls'] += 1
+        if saw_right:
+            stats['right_calls'] += 1
+        if saw_head:
+            stats['head_calls'] += 1
+    return stats
+
+
+def _has_fragmented_bilateral_upper_body_motion(code: str) -> bool:
+    stats = _upper_body_activity_stats(code)
+    if stats['head_calls'] > 0:
+        return False
+    if stats['left_calls'] == 0 or stats['right_calls'] == 0:
+        return False
+    if abs(stats['left_score'] - stats['right_score']) <= 2:
+        return True
+    if min(stats['left_calls'], stats['right_calls']) >= 1 and (stats['left_calls'] + stats['right_calls']) <= 3:
+        return True
+    return False
+
+
+def _has_non_dominant_arm_noise(summary: Dict[str, Any], code: str) -> bool:
+    stats = _upper_body_activity_stats(code)
+    active_side = str((summary or {}).get('active_side') or 'balanced').lower()
+    dominant_arm = _dominant_arm_side_in_code(code)
+    if stats['head_calls'] > 0:
+        return False
+    if active_side not in {'left_image', 'right_image'}:
+        return False
+    if dominant_arm == 'balanced':
+        return stats['left_calls'] >= 1 and stats['right_calls'] >= 1
+    if dominant_arm == 'left':
+        return stats['right_calls'] >= 1 and stats['right_score'] >= 2
+    if dominant_arm == 'right':
+        return stats['left_calls'] >= 1 and stats['left_score'] >= 2
+    return False
+
+
+def _dominant_arm_side_in_code(code: str) -> Optional[str]:
+    stats = _upper_body_activity_stats(code)
+    left_score = stats['left_score']
+    right_score = stats['right_score']
+    if left_score == 0 and right_score == 0:
+        return None
+    if left_score > right_score * 1.3:
+        return 'left'
+    if right_score > left_score * 1.3:
+        return 'right'
+    return 'balanced'
 
 
 def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any], code: str) -> bool:
@@ -471,18 +993,48 @@ def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any
     fn_names = [name for name, _ in calls]
     unique_fns = set(fn_names)
     activity = str((summary or {}).get('activity_level') or 'low').lower()
+    active_side = str((summary or {}).get('active_side') or 'balanced').lower()
+    dominant_arm = _dominant_arm_side_in_code(code)
 
     if len(lines) <= 2 and unique_fns == {'oscillate_joint'}:
         return True
     if len(lines) <= 2 and unique_fns <= {'move_joint', 'oscillate_joint', 'set_hand'}:
         return True
+    if unique_fns == {'hold'}:
+        return True
     if len(calls) <= 1:
         return True
-    if unique_fns == {'hold'}:
+    if _has_consecutive_duplicate_calls(code):
+        return True
+    if _has_symmetric_dual_arm_ik(code):
+        return True
+    if activity in {'low', 'medium'} and _has_mirrored_dual_arm_posture(code):
+        return True
+    if _has_fragmented_bilateral_upper_body_motion(code):
+        return True
+    if _has_too_many_micro_steps(code):
+        return True
+    if _has_unreadably_small_posture(code):
         return True
     if 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns and 'set_hand' not in unique_fns and len(unique_fns) == 1:
         return True
+    if _has_hand_without_postural_anchor(code):
+        return True
+    if _has_static_clip_with_arm_motion(summary, code):
+        return True
     if activity in {'medium', 'high'} and 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns:
+        return True
+    if activity in {'medium', 'high'} and not _has_readable_head_or_single_arm_focus(code):
+        return True
+    if active_side in {'left_image', 'right_image'} and dominant_arm == 'balanced':
+        return True
+    if active_side == 'left_image' and dominant_arm == 'right':
+        return True
+    if active_side == 'right_image' and dominant_arm == 'left':
+        return True
+    if _has_non_dominant_arm_noise(summary, code):
+        return True
+    if _has_no_settle_after_dynamic_motion(summary, code):
         return True
     return False
 
@@ -496,11 +1048,15 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
     fn_names = [name for name, _ in calls]
     unique_fns = set(fn_names)
     activity = str((summary or {}).get('activity_level') or 'low').lower()
+    active_side = str((summary or {}).get('active_side') or 'balanced').lower()
+    dominant_arm = _dominant_arm_side_in_code(code)
 
     if len(lines) > 8:
         penalty += 4.0
     if len(lines) <= 1:
         penalty += 5.0
+    if _has_consecutive_duplicate_calls(code):
+        penalty += 4.0
     if 'idle' in unique_fns and len(unique_fns) == 1:
         penalty += 4.0
     if 'hold' in unique_fns and len(unique_fns) == 1:
@@ -517,6 +1073,34 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
         penalty += 3.0
     if move_arm_count >= 4:
         penalty += 2.0
+    if _has_symmetric_dual_arm_ik(code):
+        penalty += 4.0
+    if _has_mirrored_dual_arm_posture(code):
+        penalty += 3.0
+    if _has_fragmented_bilateral_upper_body_motion(code):
+        penalty += 4.0
+    if _has_too_many_micro_steps(code):
+        penalty += 3.5
+    if _has_unreadably_small_posture(code):
+        penalty += 4.0
+    if _uses_only_distal_arm_joints(code):
+        penalty += 2.5
+    if _has_hand_without_postural_anchor(code):
+        penalty += 3.0
+    if _has_static_clip_with_arm_motion(summary, code):
+        penalty += 4.0
+    if activity in {'medium', 'high'} and not _has_readable_head_or_single_arm_focus(code):
+        penalty += 2.5
+    if active_side in {'left_image', 'right_image'} and dominant_arm == 'balanced':
+        penalty += 3.0
+    if active_side == 'left_image' and dominant_arm == 'right':
+        penalty += 2.5
+    if active_side == 'right_image' and dominant_arm == 'left':
+        penalty += 2.5
+    if _has_non_dominant_arm_noise(summary, code):
+        penalty += 3.0
+    if _has_no_settle_after_dynamic_motion(summary, code):
+        penalty += 1.5
     if hand_count >= 4:
         penalty += 1.5
 
@@ -529,6 +1113,89 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
         penalty += 2.5
 
     return penalty
+
+
+def _candidate_quality(summary: Dict[str, Any], semantic: Dict[str, Any], code: str, validation_ok: bool) -> Tuple[float, int, float]:
+    penalty = _naturalness_penalty(summary, code)
+    generic_flag = 1 if _looks_too_generic_for_clip(summary, semantic, code) else 0
+    validation_flag = 0 if validation_ok else 1
+    return (penalty + generic_flag * 2.0 + validation_flag * 1000.0, generic_flag, penalty)
+
+
+def _pick_best_generated_variant(
+    processor,
+    model,
+    kind: str,
+    images,
+    system_prompt: str,
+    user_prompt: str,
+    joint_limits: Dict[str, Tuple[float, float]],
+    validator: SandboxExecutor,
+    summary: Dict[str, Any],
+    attempts: int = 3,
+) -> Tuple[Dict[str, Any], str, str, bool, Tuple[float, int, float]]:
+    best_semantic: Dict[str, Any] = {}
+    best_code = ''
+    best_raw = ''
+    best_valid = False
+    best_quality: Tuple[float, int, float] = (1e9, 1, 1e9)
+
+    for idx in range(max(1, attempts)):
+        raw = _generate_with_prompt(
+            processor,
+            model,
+            kind,
+            images,
+            system_prompt,
+            user_prompt,
+            do_sample=(idx > 0),
+        )
+        semantic, code = parse_vlm_output(raw)
+        code = _sanitize_generated_code(_normalize_generated_code(code), joint_limits)
+        validation = validator.validate(code)
+        quality = _candidate_quality(summary, semantic, code, validation.ok)
+        if _candidate_has_minimal_structure(semantic, code) and quality < best_quality:
+            best_semantic, best_code, best_raw = semantic, code, raw
+            best_valid = validation.ok
+            best_quality = quality
+
+    return best_semantic, best_code, best_raw, best_valid, best_quality
+
+
+def _describe_code_quality_issue(summary: Dict[str, Any], semantic: Dict[str, Any], code: str) -> str:
+    reasons: List[str] = []
+    if _has_consecutive_duplicate_calls(code):
+        reasons.append('the code repeats the exact same primitive call consecutively')
+    if _has_symmetric_dual_arm_ik(code) or _has_mirrored_dual_arm_posture(code):
+        reasons.append('the code relies on mirrored both-arm motion, which looks generic instead of clip-specific')
+    if _has_fragmented_bilateral_upper_body_motion(code):
+        reasons.append('the code splits attention across both arms without a clear head anchor or dominant side')
+    if _has_too_many_micro_steps(code):
+        reasons.append('the code uses too many tiny rapid steps, so the motion reads as twitchy instead of natural')
+    if _has_unreadably_small_posture(code):
+        reasons.append('the code is technically valid but the posture change is so small that it reads like a no-op')
+    if _has_non_dominant_arm_noise(summary, code):
+        reasons.append('the code invents extra motion on the non-dominant arm instead of keeping the response focused and readable')
+    if _uses_only_distal_arm_joints(code):
+        reasons.append('the code only moves distal arm joints and lacks a readable upper-body posture')
+    if _has_hand_without_postural_anchor(code):
+        reasons.append('the code uses hand opening without a readable shoulder or head anchor, so the pose looks unclear')
+    if _has_static_clip_with_arm_motion(summary, code):
+        reasons.append('the clip is nearly static, but the generated response still moves an arm or hand instead of staying mostly head-led and calm')
+    if _has_no_settle_after_dynamic_motion(summary, code):
+        reasons.append('the code lacks a short settle at the end, so the response looks abrupt')
+
+    calls = _parse_code_calls(code)
+    fn_names = [name for name, _ in calls]
+    unique_fns = set(fn_names)
+    activity = str((summary or {}).get('activity_level') or 'low').lower()
+    if activity in {'medium', 'high'} and 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns:
+        reasons.append('the code is too small for the visible motion energy in the clip')
+    if len(_non_comment_code_lines(code)) <= 2:
+        reasons.append('the response is too short and generic')
+    if not reasons:
+        reasons.append('the code is not sufficiently grounded in the specific clip')
+    return '; '.join(reasons)
 
 
 def _pick_backend(api_key: Optional[str]) -> str:
@@ -725,7 +1392,7 @@ def _smolvlm_multi_image_generate(processor, model, images, system_prompt: str, 
     return raw
 
 
-def _qwen_multi_image_generate_with_prompt(processor, model, images, system_prompt: str, user_prompt: str) -> str:
+def _qwen_multi_image_generate_with_prompt(processor, model, images, system_prompt: str, user_prompt: str, do_sample: bool = False) -> str:
     messages = [{
         'role': 'system',
         'content': [{'type': 'text', 'text': system_prompt}],
@@ -739,12 +1406,18 @@ def _qwen_multi_image_generate_with_prompt(processor, model, images, system_prom
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = processor(text=[text], images=images, return_tensors='pt', padding=True)
     inputs = {key: value.to(model.device) for key, value in inputs.items()}
-    output_ids = model.generate(**inputs, max_new_tokens=max(256, config.VLM_MAX_TOKENS), do_sample=False)
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=max(256, config.VLM_MAX_TOKENS),
+        do_sample=do_sample,
+        temperature=(config.LOCAL_VLM_TEMPERATURE if do_sample else None),
+        top_p=(config.LOCAL_VLM_TOP_P if do_sample else None),
+    )
     trimmed = [out[len(inp):] for inp, out in zip(inputs['input_ids'], output_ids)]
     return processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0].strip()
 
 
-def _smolvlm_multi_image_generate_with_prompt(processor, model, images, system_prompt: str, user_prompt: str) -> str:
+def _smolvlm_multi_image_generate_with_prompt(processor, model, images, system_prompt: str, user_prompt: str, do_sample: bool = False) -> str:
     conversation = [{
         'role': 'system',
         'content': [{'type': 'text', 'text': system_prompt}],
@@ -763,9 +1436,21 @@ def _smolvlm_multi_image_generate_with_prompt(processor, model, images, system_p
         return_tensors='pt',
     )
     inputs = {key: (value.to(model.device) if hasattr(value, 'to') else value) for key, value in inputs.items()}
-    output_ids = model.generate(**inputs, max_new_tokens=max(256, config.VLM_MAX_TOKENS), do_sample=False)
+    output_ids = model.generate(
+        **inputs,
+        max_new_tokens=max(256, config.VLM_MAX_TOKENS),
+        do_sample=do_sample,
+        temperature=(config.LOCAL_VLM_TEMPERATURE if do_sample else None),
+        top_p=(config.LOCAL_VLM_TOP_P if do_sample else None),
+    )
     new_tokens = output_ids[:, inputs['input_ids'].shape[1]:]
     return processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
+
+
+def _generate_with_prompt(processor, model, kind: str, images, system_prompt: str, user_prompt: str, do_sample: bool = False) -> str:
+    if kind == 'qwen2_5_vl':
+        return _qwen_multi_image_generate_with_prompt(processor, model, images, system_prompt, user_prompt, do_sample=do_sample)
+    return _smolvlm_multi_image_generate_with_prompt(processor, model, images, system_prompt, user_prompt, do_sample=do_sample)
 
 
 def _is_probable_cuda_oom(exc: Exception) -> bool:
@@ -851,10 +1536,22 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
             ''.join(ch for ch in name if ch.isalnum()).lower(): name
             for name in self.joint_limits
         }
+        self.comfort_ratios = {
+            'HeadPitch': 0.78,
+            'LShoulderPitch': 0.82,
+            'RShoulderPitch': 0.82,
+            'LShoulderRoll': 0.84,
+            'RShoulderRoll': 0.84,
+            'LElbowRoll': 0.86,
+            'RElbowRoll': 0.86,
+        }
 
     def _literal(self, node):
         try:
-            return ast.literal_eval(node)
+            value = ast.literal_eval(node)
+            if isinstance(value, (list, tuple)) and len(value) == 1 and isinstance(value[0], (int, float)):
+                return value[0]
+            return value
         except Exception:
             return None
 
@@ -893,7 +1590,15 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
         limits = self.joint_limits.get(joint_name)
         if limits is None or limits[0] == limits[1]:
             return angle
-        return float(max(limits[0], min(limits[1], float(angle))))
+        lo, hi = float(limits[0]), float(limits[1])
+        target = float(angle)
+        ratio = self.comfort_ratios.get(joint_name)
+        if ratio is not None:
+            center = 0.5 * (lo + hi)
+            half = 0.5 * (hi - lo) * float(ratio)
+            lo = center - half
+            hi = center + half
+        return float(max(lo, min(hi, target)))
 
     def _sanitize_oscillation(self, joint_name: Any, center: Any, amplitude: Any):
         if not isinstance(joint_name, str) or not isinstance(center, (int, float)) or not isinstance(amplitude, (int, float)):
@@ -916,17 +1621,34 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
             return openness
         return float(max(0.0, min(1.0, float(openness))))
 
+    def _normalize_arm_side(self, side: Any) -> Any:
+        if not isinstance(side, str):
+            return side
+        normalized = side.strip().lower()
+        alias_map = {
+            'l': 'left',
+            'left': 'left',
+            'left_arm': 'left',
+            'left_hand': 'left',
+            'r': 'right',
+            'right': 'right',
+            'right_arm': 'right',
+            'right_hand': 'right',
+        }
+        return alias_map.get(normalized, side)
+
     def _sanitize_arm_target(self, side: Any, xyz: Any):
+        side = self._normalize_arm_side(side)
         if not isinstance(side, str) or not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
             return xyz
         try:
             x, y, z = [float(v) for v in xyz]
         except Exception:
             return xyz
-        x = max(0.05, min(0.24, x))
-        lateral = max(0.05, min(0.24, abs(y)))
+        x = max(0.06, min(0.20, x))
+        lateral = max(0.06, min(0.18, abs(y)))
         y = lateral if side == 'left' else -lateral
-        z = max(-0.24, min(0.16, z))
+        z = max(-0.16, min(0.13, z))
         return [round(x, 4), round(y, 4), round(z, 4)]
 
     def visit_Call(self, node: ast.Call):
@@ -969,17 +1691,32 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
 
         if fn_name == 'move_arm_ik':
             side = self._literal(node.args[0]) if len(node.args) >= 1 else self._literal(self._find_keyword(node, 'side').value) if self._find_keyword(node, 'side') else None
+            normalized_side = self._normalize_arm_side(side)
+            if len(node.args) >= 1 and isinstance(normalized_side, str):
+                node.args[0] = ast.Constant(value=normalized_side)
+            else:
+                kw = self._find_keyword(node, 'side')
+                if kw is not None and isinstance(normalized_side, str):
+                    kw.value = ast.Constant(value=normalized_side)
             if len(node.args) >= 2:
-                safe_xyz = self._sanitize_arm_target(side, self._literal(node.args[1]))
+                safe_xyz = self._sanitize_arm_target(normalized_side, self._literal(node.args[1]))
                 if isinstance(safe_xyz, list):
                     node.args[1] = ast.List(elts=[ast.Constant(value=v) for v in safe_xyz], ctx=ast.Load())
             else:
                 kw = self._find_keyword(node, 'xyz')
-                safe_xyz = self._sanitize_arm_target(side, self._literal(kw.value) if kw is not None else None)
+                safe_xyz = self._sanitize_arm_target(normalized_side, self._literal(kw.value) if kw is not None else None)
                 if kw is not None and isinstance(safe_xyz, list):
                     kw.value = ast.List(elts=[ast.Constant(value=v) for v in safe_xyz], ctx=ast.Load())
 
         if fn_name == 'set_hand':
+            side = self._literal(node.args[0]) if len(node.args) >= 1 else self._literal(self._find_keyword(node, 'side').value) if self._find_keyword(node, 'side') else None
+            normalized_side = self._normalize_arm_side(side)
+            if len(node.args) >= 1 and isinstance(normalized_side, str):
+                node.args[0] = ast.Constant(value=normalized_side)
+            else:
+                kw = self._find_keyword(node, 'side')
+                if kw is not None and isinstance(normalized_side, str):
+                    kw.value = ast.Constant(value=normalized_side)
             if len(node.args) >= 2:
                 safe_openness = self._sanitize_hand_openness(self._literal(node.args[1]))
                 if isinstance(safe_openness, (int, float)):
@@ -1050,6 +1787,26 @@ def _normalize_generated_code(code: str) -> str:
     normalized = re.sub(
         r'move_head\s*\(\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)',
         r"move_joints({'HeadYaw': \1, 'HeadPitch': \2}, \3, 'min_jerk')",
+        normalized,
+    )
+    normalized = re.sub(
+        r'move_head\s*\(\s*yaw\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*pitch\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*duration\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)',
+        r"move_joints({'HeadYaw': \1, 'HeadPitch': \2}, \3, 'min_jerk')",
+        normalized,
+    )
+    normalized = re.sub(
+        r'move_head\s*\(\s*pitch\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*yaw\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*duration\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)',
+        r"move_joints({'HeadYaw': \2, 'HeadPitch': \1}, \3, 'min_jerk')",
+        normalized,
+    )
+    normalized = re.sub(
+        r'move_head\s*\(\s*yaw\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*pitch\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)',
+        r"move_joints({'HeadYaw': \1, 'HeadPitch': \2}, 0.2, 'min_jerk')",
+        normalized,
+    )
+    normalized = re.sub(
+        r'move_head\s*\(\s*pitch\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*yaw\s*=\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)',
+        r"move_joints({'HeadYaw': \2, 'HeadPitch': \1}, 0.2, 'min_jerk')",
         normalized,
     )
 
@@ -1156,6 +1913,7 @@ class VLMClient:
         self.joint_limits = dict(joint_limits or {})
         self.system_prompt = build_system_prompt(joint_limits)
         self.static_validator = _build_static_validator(self.joint_limits)
+        self.runtime_validator = _build_static_validator(self.joint_limits)
         self.backend = _pick_backend(self.api_key)
         self.client = None
 
@@ -1269,29 +2027,50 @@ class VLMClient:
                     continue
                 parsed_candidates.append((semantic, code, raw))
                 validation = self.static_validator.validate(code)
+                runtime_ok = validation.ok and _runtime_signature_ok(self.runtime_validator, code)
                 if config.LOCAL_VLM_DEBUG:
-                    print(f'[VLMClient][local] candidate valid={validation.ok} semantic={semantic}')
-                if validation.ok:
+                    print(f'[VLMClient][local] candidate valid={validation.ok and runtime_ok} semantic={semantic}')
+                if validation.ok and runtime_ok:
                     valid_candidates.append((semantic, code, raw))
 
             if not valid_candidates:
-                seed_raw = raw_candidates[0] if raw_candidates else ''
-                seed_semantic, seed_code = parse_vlm_output(seed_raw)
-                seed_code = _sanitize_generated_code(_normalize_generated_code(seed_code), self.joint_limits)
+                if parsed_candidates:
+                    seed_semantic, seed_code, seed_raw = parsed_candidates[0]
+                else:
+                    seed_raw = raw_candidates[0] if raw_candidates else ''
+                    seed_semantic, seed_code = parse_vlm_output(seed_raw)
+                    seed_code = _sanitize_generated_code(_normalize_generated_code(seed_code), self.joint_limits)
+                seed_issue = _describe_code_quality_issue(summary, seed_semantic, seed_code)
                 parse_repair_prompt = _build_repair_prompt_with_summary(
                     frames_b64,
                     seed_semantic,
                     seed_code,
-                    'no_valid_candidate_after_static_validation',
+                    f'no_valid_candidate_after_static_validation; {seed_issue}',
                 )
-                if kind == 'qwen2_5_vl':
-                    repaired_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
-                else:
-                    repaired_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
-                repaired_semantic, repaired_code = parse_vlm_output(repaired_raw)
-                repaired_code = _sanitize_generated_code(_normalize_generated_code(repaired_code), self.joint_limits)
+                repaired_semantic, repaired_code, repaired_raw, repaired_valid, repaired_quality = _pick_best_generated_variant(
+                    processor, model, kind, images, self.system_prompt, parse_repair_prompt,
+                    self.joint_limits, self.static_validator, summary, attempts=3,
+                )
                 repaired_validation = self.static_validator.validate(repaired_code)
-                if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
+                repaired_runtime_ok = repaired_validation.ok and _runtime_signature_ok(self.runtime_validator, repaired_code)
+                if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok and repaired_runtime_ok:
+                    if repaired_quality[1] == 1 or repaired_quality[0] >= 4.0:
+                        second_prompt = parse_repair_prompt + (
+                            "\n\nMake the response more readable and clip-specific: choose one dominant arm or head-led posture, "
+                            "avoid mirrored both-arm motion, and keep 2-4 primitive calls."
+                        )
+                        second_semantic, second_code, second_raw, second_valid, second_quality = _pick_best_generated_variant(
+                            processor, model, kind, images, self.system_prompt, second_prompt,
+                            self.joint_limits, self.static_validator, summary, attempts=3,
+                        )
+                        second_validation = self.static_validator.validate(second_code)
+                        second_runtime_ok = second_validation.ok and _runtime_signature_ok(self.runtime_validator, second_code)
+                        if (
+                            _candidate_has_minimal_structure(second_semantic, second_code)
+                            and second_validation.ok and second_runtime_ok
+                            and second_quality < repaired_quality
+                        ):
+                            repaired_semantic, repaired_code, repaired_raw = second_semantic, second_code, second_raw
                     return VLMResponse(
                         semantic_context=repaired_semantic,
                         python_code=repaired_code,
@@ -1300,10 +2079,11 @@ class VLMClient:
                         ok=True,
                         error=None,
                     )
-                return VLMResponse({}, '', repaired_raw, time.time() - t0, False, error=f'parse_incomplete:{repaired_validation.error}')
+                runtime_err = None if repaired_runtime_ok else 'runtime_signature_mismatch'
+                return VLMResponse({}, '', repaired_raw, time.time() - t0, False, error=f'parse_incomplete:{repaired_validation.error or runtime_err}')
             pool = sorted(
                 valid_candidates,
-                key=lambda item: _naturalness_penalty(summary, item[1]),
+                key=lambda item: _candidate_quality(summary, item[0], item[1], True),
             )
 
             if len(pool) == 1:
@@ -1317,32 +2097,68 @@ class VLMClient:
                 chosen_index = parse_chosen_candidate_index(selected_raw)
                 if config.LOCAL_VLM_DEBUG:
                     print(f'[VLMClient][local] chosen candidate raw={selected_raw!r} parsed_index={chosen_index}')
+                default_semantic, default_code, default_raw = pool[0]
+                default_quality = _candidate_quality(summary, default_semantic, default_code, True)
                 if chosen_index is not None and 1 <= chosen_index <= len(pool):
-                    best_semantic, best_code, best_raw = pool[chosen_index - 1]
+                    chosen_semantic, chosen_code, chosen_raw = pool[chosen_index - 1]
+                    chosen_quality = _candidate_quality(summary, chosen_semantic, chosen_code, True)
+                    if chosen_quality[0] <= default_quality[0] + 1.0:
+                        best_semantic, best_code, best_raw = chosen_semantic, chosen_code, chosen_raw
+                    else:
+                        if config.LOCAL_VLM_DEBUG:
+                            print(f'[VLMClient][local] selection guard kept pool[0]: chosen_quality={chosen_quality} default_quality={default_quality}')
+                        best_semantic, best_code, best_raw = default_semantic, default_code, default_raw
                 else:
-                    best_semantic, best_code, best_raw = pool[0]
+                    best_semantic, best_code, best_raw = default_semantic, default_code, default_raw
+
+            best_quality = _candidate_quality(summary, best_semantic, best_code, True)
 
             if best_code and (
                 _looks_too_generic_for_clip(summary, best_semantic, best_code)
                 or _naturalness_penalty(summary, best_code) >= 3.0
             ):
+                quality_issue = _describe_code_quality_issue(summary, best_semantic, best_code)
                 refinement_prompt = _build_refinement_prompt_with_summary(
                     frames_b64,
                     best_semantic,
                     best_code,
-                    'candidate_too_generic_for_this_clip',
+                    quality_issue,
                 )
-                if kind == 'qwen2_5_vl':
-                    refined_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, refinement_prompt)
-                else:
-                    refined_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, refinement_prompt)
-                refined_semantic, refined_code = parse_vlm_output(refined_raw)
-                refined_code = _sanitize_generated_code(_normalize_generated_code(refined_code), self.joint_limits)
+                refined_semantic, refined_code, refined_raw, refined_valid, refined_quality = _pick_best_generated_variant(
+                    processor, model, kind, images, self.system_prompt, refinement_prompt,
+                    self.joint_limits, self.static_validator, summary, attempts=3,
+                )
                 refined_validation = self.static_validator.validate(refined_code)
+                refined_runtime_ok = refined_validation.ok and _runtime_signature_ok(self.runtime_validator, refined_code)
                 if config.LOCAL_VLM_DEBUG:
-                    print(f'[VLMClient][local] refinement valid={refined_validation.ok} semantic={refined_semantic}')
-                if _candidate_has_minimal_structure(refined_semantic, refined_code) and refined_validation.ok:
+                    print(f'[VLMClient][local] refinement valid={refined_validation.ok and refined_runtime_ok} semantic={refined_semantic} quality={refined_quality}')
+                if (
+                    _candidate_has_minimal_structure(refined_semantic, refined_code)
+                    and refined_validation.ok and refined_runtime_ok
+                    and refined_quality < best_quality
+                ):
                     best_semantic, best_code, best_raw = refined_semantic, refined_code, refined_raw
+                    best_quality = refined_quality
+                elif best_quality[1] == 1 or best_quality[0] >= 4.0:
+                    second_prompt = refinement_prompt + (
+                        "\n\nTry a more readable pet-like response: use one dominant arm and/or head orientation, "
+                        "avoid bilateral mirroring, make the intent visible in 2-4 primitive calls, and finish with a short hold or idle."
+                    )
+                    second_semantic, second_code, second_raw, second_valid, second_quality = _pick_best_generated_variant(
+                        processor, model, kind, images, self.system_prompt, second_prompt,
+                        self.joint_limits, self.static_validator, summary, attempts=3,
+                    )
+                    second_validation = self.static_validator.validate(second_code)
+                    second_runtime_ok = second_validation.ok and _runtime_signature_ok(self.runtime_validator, second_code)
+                    if config.LOCAL_VLM_DEBUG:
+                        print(f'[VLMClient][local] refinement second-pass valid={second_validation.ok and second_runtime_ok} semantic={second_semantic} quality={second_quality}')
+                    if (
+                        _candidate_has_minimal_structure(second_semantic, second_code)
+                        and second_validation.ok and second_runtime_ok
+                        and second_quality < best_quality
+                    ):
+                        best_semantic, best_code, best_raw = second_semantic, second_code, second_raw
+                        best_quality = second_quality
 
             final_validation = self.static_validator.validate(best_code)
             if ((not best_code or not best_semantic) or (not final_validation.ok)) and parsed_candidates:
@@ -1353,25 +2169,30 @@ class VLMClient:
                     fallback_code,
                     'candidate_parse_or_selection_failed',
                 )
-                if kind == 'qwen2_5_vl':
-                    repaired_raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
-                else:
-                    repaired_raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, parse_repair_prompt)
-                repaired_semantic, repaired_code = parse_vlm_output(repaired_raw)
-                repaired_code = _sanitize_generated_code(_normalize_generated_code(repaired_code), self.joint_limits)
+                repaired_semantic, repaired_code, repaired_raw, repaired_valid, repaired_quality = _pick_best_generated_variant(
+                    processor, model, kind, images, self.system_prompt, parse_repair_prompt,
+                    self.joint_limits, self.static_validator, summary, attempts=3,
+                )
                 repaired_validation = self.static_validator.validate(repaired_code)
-                if _candidate_has_minimal_structure(repaired_semantic, repaired_code) and repaired_validation.ok:
+                repaired_runtime_ok = repaired_validation.ok and _runtime_signature_ok(self.runtime_validator, repaired_code)
+                if (
+                    _candidate_has_minimal_structure(repaired_semantic, repaired_code)
+                    and repaired_validation.ok and repaired_runtime_ok
+                    and repaired_quality < best_quality
+                ):
                     best_semantic, best_code, best_raw = repaired_semantic, repaired_code, repaired_raw
+                    best_quality = repaired_quality
 
             final_validation = self.static_validator.validate(best_code)
-            ok = bool(best_code) and bool(best_semantic) and final_validation.ok
+            final_runtime_ok = final_validation.ok and _runtime_signature_ok(self.runtime_validator, best_code)
+            ok = bool(best_code) and bool(best_semantic) and final_validation.ok and final_runtime_ok
             return VLMResponse(
                 semantic_context=best_semantic,
                 python_code=best_code,
                 raw_text=best_raw,
                 elapsed_seconds=time.time() - t0,
                 ok=ok,
-                error=None if ok else f'invalid_or_incomplete:{final_validation.error}',
+                error=None if ok else f'invalid_or_incomplete:{final_validation.error or "runtime_signature_mismatch"}',
             )
         except Exception as exc:
             if _is_probable_cuda_oom(exc):
@@ -1443,14 +2264,12 @@ class VLMClient:
         try:
             images = _decode_frames_to_pil(frames_b64)
             processor, model, kind = _load_local_model(self.model)
+            summary = _infer_visual_motion_summary(frames_b64)
             repair_prompt = _build_repair_prompt_with_summary(frames_b64, semantic_context, python_code, error_text)
-            if kind == 'qwen2_5_vl':
-                raw = _qwen_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
-            else:
-                raw = _smolvlm_multi_image_generate_with_prompt(processor, model, images, self.system_prompt, repair_prompt)
-
-            semantic, code = parse_vlm_output(raw)
-            code = _sanitize_generated_code(_normalize_generated_code(code), self.joint_limits)
+            semantic, code, raw, _, _ = _pick_best_generated_variant(
+                processor, model, kind, images, self.system_prompt, repair_prompt,
+                self.joint_limits, self.static_validator, summary, attempts=3,
+            )
             validation = self.static_validator.validate(code)
             ok = bool(code) and bool(semantic) and validation.ok
             return VLMResponse(

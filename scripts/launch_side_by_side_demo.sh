@@ -6,9 +6,12 @@ WEBOTS_BIN="/home/darian/.local/opt/webots/webots"
 WORLD_FILE="$REPO_DIR/nao_VLM/worlds/nao_VLM.wbt"
 FFPLAY_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/ffplay"
 WMCTRL_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/wmctrl"
+XPROP_BIN="/usr/bin/xprop"
 
 VIDEO_PATH="${1:-$REPO_DIR/example_video/webcam_20260425_072825.mp4}"
 MODEL_ID="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-7B-Instruct}"
+DEMO_MODE="${DEMO_MODE:-oneshot}"
+REPLAY_CODE_PATH="${REPLAY_CODE_PATH:-}"
 VIDEO_TITLE="${VIDEO_TITLE:-Demo Source Video}"
 VIDEO_GEOM="${VIDEO_GEOM:-0,0,0,820,700}"
 WEBOTS_GEOM="${WEBOTS_GEOM:-0,830,0,1050,700}"
@@ -35,7 +38,7 @@ cat > "$REPO_DIR/.env" <<EOF
 llm_api_key=
 base_url=
 INPUT_MODE=webcam
-RUN_MODE=oneshot
+RUN_MODE=$DEMO_MODE
 WEBCAM_SOURCE=$VIDEO_PATH
 FRAMEBUFFER_BACKEND=auto
 FRAME_BUFFER_SECONDS=8
@@ -45,23 +48,28 @@ FRAMEBUFFER_HEIGHT=720
 VLM_BACKEND=local
 LOCAL_VLM_MODEL=$MODEL_ID
 LOCAL_VLM_SERVER_URL=${LOCAL_VLM_SERVER_URL:-}
+LOCAL_VLM_LOAD_IN_4BIT=${LOCAL_VLM_LOAD_IN_4BIT:-1}
+LOCAL_VLM_NUM_CANDIDATES=${LOCAL_VLM_NUM_CANDIDATES:-3}
+LOCAL_VLM_DEBUG=${LOCAL_VLM_DEBUG:-1}
 VLM_MODEL=gpt-4o
 VLM_FRAME_COUNT=6
 VLM_WINDOW_SECONDS=5.0
+VLM_MAX_TOKENS=${VLM_MAX_TOKENS:-700}
 ONE_SHOT_BUFFER_TIMEOUT=8
 ONE_SHOT_VLM_TIMEOUT=120
 ONE_SHOT_VIDEO_SETTLE_SECONDS=6.0
 VLM_SCENARIO_HINT=
+REPLAY_CODE_PATH=$REPLAY_CODE_PATH
 EOF
 
 export DISPLAY=:0
 export XDG_SESSION_TYPE=x11
 
-"$FFPLAY_BIN" -window_title "$VIDEO_TITLE" -left 0 -top 0 -x 820 -y 640 -autoexit "$VIDEO_PATH" >"$FFPLAY_LOG" 2>&1 &
+"$FFPLAY_BIN" -window_title "$VIDEO_TITLE" -left 0 -top 0 -x 1280 -y 1400 -loop 0 "$VIDEO_PATH" >"$FFPLAY_LOG" 2>&1 &
 FFPLAY_PID=$!
 
 sleep "$STARTUP_SLEEP"
-"$WEBOTS_BIN" --mode=realtime "$WORLD_FILE" >"$WEBOTS_LOG" 2>&1 &
+"$WEBOTS_BIN" --mode=realtime --stdout --stderr "$WORLD_FILE" >"$WEBOTS_LOG" 2>&1 &
 WEBOTS_PID=$!
 
 if [[ -x "$WMCTRL_BIN" ]]; then
@@ -70,10 +78,16 @@ if [[ -x "$WMCTRL_BIN" ]]; then
     WEBOTS_WIN_ID="$($WMCTRL_BIN -l | awk 'tolower($0) ~ /webots/ {print $1; exit}')"
     VIDEO_WIN_ID="$($WMCTRL_BIN -l | awk -v title="$VIDEO_TITLE" 'index($0, title) {print $1; exit}')"
     if [[ -n "$VIDEO_WIN_ID" ]]; then
+      "$WMCTRL_BIN" -i -r "$VIDEO_WIN_ID" -b remove,maximized_vert,maximized_horz || true
+      "$WMCTRL_BIN" -i -r "$VIDEO_WIN_ID" -b add,above || true
       "$WMCTRL_BIN" -i -r "$VIDEO_WIN_ID" -e "$VIDEO_GEOM" || true
     fi
     if [[ -n "$WEBOTS_WIN_ID" ]]; then
+      "$WMCTRL_BIN" -i -r "$WEBOTS_WIN_ID" -b remove,maximized_vert,maximized_horz || true
+      "$WMCTRL_BIN" -i -r "$WEBOTS_WIN_ID" -b remove,above || true
       "$WMCTRL_BIN" -i -r "$WEBOTS_WIN_ID" -e "$WEBOTS_GEOM" || true
+    fi
+    if [[ -n "$VIDEO_WIN_ID" && -n "$WEBOTS_WIN_ID" ]]; then
       break
     fi
   done

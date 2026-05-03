@@ -82,6 +82,47 @@ def build_executor() -> SandboxExecutor:
     return executor
 
 
+def build_runtime_signature_executor() -> SandboxExecutor:
+    executor = SandboxExecutor()
+
+    def move_joint(name: str, angle: float, duration: float, trajectory: str = 'cubic'):
+        return None
+
+    def move_joints(joint_angles: dict, duration: float, trajectory: str = 'cubic'):
+        return None
+
+    def move_arm_ik(side: str, xyz, duration: float, orientation=None):
+        return None
+
+    def move_head(yaw: float, pitch: float, duration: float = 0.2, trajectory: str = 'min_jerk'):
+        return None
+
+    def set_hand(side: str, openness: float, duration: float, trajectory: str = 'cubic'):
+        return None
+
+    def oscillate_joint(name: str, center: float, amplitude: float, frequency: float, duration: float, decay: float = 0.0):
+        return None
+
+    def hold(duration: float):
+        return None
+
+    def idle(duration: float):
+        return None
+
+    executor.register_many({
+        'move_joint': move_joint,
+        'move_joints': move_joints,
+        'move_arm_ik': move_arm_ik,
+        'move_head': move_head,
+        'set_hand': set_hand,
+        'oscillate_joint': oscillate_joint,
+        'hold': hold,
+        'idle': idle,
+    })
+    executor.set_joint_limits(build_executor()._joint_limits)
+    return executor
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument('videos', nargs='+', help='一个或多个 mp4 路径')
@@ -91,6 +132,7 @@ def main() -> int:
 
     client = vlm_client.VLMClient(joint_limits=build_executor()._joint_limits, model=args.model)
     validator = build_executor()
+    runtime_executor = build_runtime_signature_executor()
 
     for video in args.videos:
         path = Path(video)
@@ -99,6 +141,9 @@ def main() -> int:
         print(f'\n===== {path.name} =====')
         frames_b64 = sample_video_frames(path, args.frames)
         print(f'采样帧数: {len(frames_b64)}')
+        summary = vlm_client._infer_visual_motion_summary(frames_b64)
+        print('motion_summary=')
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
         rsp = client.call(frames_b64)
         print(f'ok={rsp.ok} error={rsp.error} elapsed={rsp.elapsed_seconds:.2f}s')
         print('semantic_context=')
@@ -107,6 +152,13 @@ def main() -> int:
         print(rsp.python_code)
         validation = validator.validate(rsp.python_code)
         print(f'validator_ok={validation.ok} validator_error={validation.error}')
+        runtime_result = runtime_executor.run(rsp.python_code) if rsp.python_code else None
+        if runtime_result is not None:
+            print(f'runtime_ok={runtime_result.ok} runtime_error={runtime_result.error}')
+        if rsp.python_code:
+            penalty = vlm_client._naturalness_penalty(summary, rsp.python_code)
+            generic = vlm_client._looks_too_generic_for_clip(summary, rsp.semantic_context, rsp.python_code)
+            print(f'naturalness_penalty={penalty:.2f} generic_like={generic}')
 
     return 0
 

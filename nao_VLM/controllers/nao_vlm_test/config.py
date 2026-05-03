@@ -49,7 +49,10 @@ FRAMEBUFFER_HEIGHT = int(os.getenv('FRAMEBUFFER_HEIGHT', '720'))
 # Controller run mode:
 #   'periodic' - original Phase-0 loop, kick VLM every fixed interval
 #   'oneshot'  - sample once from webcam/video, call VLM once, execute once, then exit
+#   'replay'   - skip VLM call, execute precomputed low-level code from file
 RUN_MODE = os.getenv('RUN_MODE', 'periodic').strip().lower()
+REPLAY_CODE_PATH = os.getenv('REPLAY_CODE_PATH', '').strip()
+REPLAY_START_DELAY = float(os.getenv('REPLAY_START_DELAY', '0.0'))
 ONE_SHOT_BUFFER_TIMEOUT = float(os.getenv('ONE_SHOT_BUFFER_TIMEOUT', '8.0'))
 ONE_SHOT_VLM_TIMEOUT = float(os.getenv('ONE_SHOT_VLM_TIMEOUT', '90.0'))
 ONE_SHOT_EXIT_AFTER_EXECUTE = os.getenv('ONE_SHOT_EXIT_AFTER_EXECUTE', '1').strip().lower() not in {

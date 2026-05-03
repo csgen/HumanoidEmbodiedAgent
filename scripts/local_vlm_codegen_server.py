@@ -13,6 +13,7 @@ CTRL_DIR = REPO_DIR / 'nao_VLM' / 'controllers' / 'nao_vlm_test'
 sys.path.insert(0, str(CTRL_DIR))
 
 os.environ.setdefault('VLM_BACKEND', 'local')
+os.environ.pop('LOCAL_VLM_SERVER_URL', None)
 
 import vlm_client
 
@@ -33,6 +34,14 @@ def get_client(model: str | None = None):
 def health():
     model = os.environ.get('LOCAL_VLM_MODEL', 'Qwen/Qwen2.5-VL-7B-Instruct')
     return jsonify({'ok': True, 'model': model})
+
+
+@app.post('/warmup')
+def warmup():
+    payload = request.get_json(silent=True) or {}
+    model = payload.get('model')
+    client = get_client(model)
+    return jsonify({'ok': True, 'model': client.model})
 
 
 @app.post('/generate_from_frames')

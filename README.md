@@ -75,3 +75,6 @@ conda env create -f environment.yml
 In `oneshot` mode, the controller samples a short frame sequence from the video,
 calls the VLM once, executes the returned Python primitive sequence once, saves
 artifacts under `artifacts/oneshot/`, and exits.
+
+### 6. 协作与日常使用
+如果你是协作者，先看 `COLLABORATOR_GUIDE.md`。里面包括当前阶段、常用脚本、以及只推送 `artifacts/screen_recordings_matched/` 的约定。
