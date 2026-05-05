@@ -1057,7 +1057,17 @@ def main():
             rsp = worker.poll()
             if rsp is not None:
                 if rsp.ok:
-                    print(f'[VLM] {rsp.elapsed_seconds:.2f}s  ctx={rsp.semantic_context}')
+                    ctx = rsp.semantic_context or {}
+                    md = ctx.get('motion_dynamics', '?')
+                    aff = ctx.get('affect', '?')
+                    dist = ctx.get('social_distance', '?')
+                    conf = ctx.get('confidence', '?')
+                    human_intent = ctx.get('intent', '(not set)')
+                    robot_intent = ctx.get('robot_intent', '(not set)')
+                    print(f'[VLM] {rsp.elapsed_seconds:.2f}s  '
+                          f'{md}/{aff}/{dist}  conf={conf}')
+                    print(f'[VLM]   human: {human_intent}')
+                    print(f'[VLM]   robot: {robot_intent}')
                     print(f'[VLM] code:\n{rsp.python_code}\n')
                     result = executor.run(rsp.python_code)
                     if result.ok:

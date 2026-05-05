@@ -166,10 +166,13 @@ move_arm_ik('right', xyz=[0.02, -0.10, -0.20], duration=0.4)
 
 ## Example 2 — motion_dynamics = "static" with curious affect
 # Small attentive head cue, brief settle. NO arms when the clip is just a
-# still pose — moving arms here would feel forced.
+# still pose — moving arms here would feel forced. The first move_head MUST
+# have a non-trivial yaw or pitch (>=0.10 rad in magnitude); a no-op
+# (yaw=0, pitch=0) is rejected by the safety validator and counted as a
+# fallback. Vary the angle direction with the human's apparent attention.
 move_head(yaw=0.18, pitch=-0.05, duration=0.4, trajectory='min_jerk')
 hold(0.6)
-move_head(yaw=0.0, pitch=0.0, duration=0.4, trajectory='min_jerk')
+move_head(yaw=-0.10, pitch=0.0, duration=0.4, trajectory='min_jerk')
 
 ## Example 3 — motion_dynamics = "approaching" with neutral/cautious affect
 # Lean upper body slightly back via shoulder pitch (NO lower-body joints) and
@@ -186,12 +189,17 @@ First a JSON block, THEN a Python block, and nothing else:
 
 ```json
 {{
-  "intent": "<short free-form description of what the human is doing>",
+  "intent": "<short description of what the HUMAN is doing>",
   "social_distance": "close" | "medium" | "far",
   "affect": "<happy|neutral|hostile|sad|curious|etc.>",
   "confidence": <float 0.0-1.0>,
   "motion_dynamics": "oscillatory" | "approaching" | "retreating" |
-                     "raising" | "lowering" | "static"
+                     "raising" | "lowering" | "static",
+  "robot_intent": "<short description of how the ROBOT should respond, in
+                   plain English; should match what the Python code below
+                   actually does — e.g. 'wave back with right hand, warm
+                   tone' or 'tilt head curiously and hold' or 'lean back,
+                   raise open palm in caution'>"
 }}
 ```
 
