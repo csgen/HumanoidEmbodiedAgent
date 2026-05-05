@@ -1,0 +1,24 @@
+; Webots controller runtime configuration — TEMPLATE.
+;
+; Each developer should copy this file to `runtime.ini` (same directory) and
+; edit COMMAND to point at THEIR local Python interpreter (the one that has
+; opencv, pinocchio, openai, etc. installed). The active runtime.ini is
+; gitignored so paths do not collide between teammates.
+;
+; Tells Webots which Python interpreter to use for this controller. Must be
+; absolute and point at your project environment, otherwise Webots falls back
+; to /usr/bin/python3 which doesn't see the project-installed packages.
+
+[python]
+; Ubuntu / Linux examples (pick whichever you use):
+;   COMMAND = /home/<you>/miniconda3/envs/<env_name>/bin/python3
+;   COMMAND = /home/<you>/Projects/HumanoidEmbodiedAgent/.venv/bin/python3
+;
+; Windows example:
+;   COMMAND = C:\path\to\repo\.venv\Scripts\python.exe
+;
+; macOS examples:
+;   COMMAND = /opt/homebrew/Caskroom/miniconda/base/envs/<env_name>/bin/python3
+;   COMMAND = /Users/<you>/Projects/HumanoidEmbodiedAgent/.venv/bin/python3
+
+COMMAND = /CHANGE/ME/TO/YOUR/PYTHON

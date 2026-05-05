@@ -231,6 +231,11 @@ log/
 *.wbproj
 .cache/
 
+# Per-developer Webots controller runtime config (points at local Python).
+# A template is committed at <controller>/runtime.ini.example; each
+# developer copies it to runtime.ini and edits COMMAND for their machine.
+nao_VLM/controllers/*/runtime.ini
+
 *.jpg
 *.png
 /vlm_view.jpg
