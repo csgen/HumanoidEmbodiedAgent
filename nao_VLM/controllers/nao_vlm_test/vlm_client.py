@@ -83,7 +83,7 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 
     move_head(yaw: float, pitch: float, duration: float = 0.2,
               trajectory: str = 'min_jerk')
-        # Convenience over move_joints({'HeadYaw': yaw, 'HeadPitch': pitch}).
+        # Convenience over move_joints with HeadYaw + HeadPitch keys.
         # yaw +ve looks LEFT, -ve looks RIGHT. pitch +ve looks DOWN, -ve looks UP.
 
     set_hand(side: str, openness: float, duration: float,
