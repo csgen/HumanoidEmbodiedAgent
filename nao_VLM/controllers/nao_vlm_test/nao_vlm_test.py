@@ -22,12 +22,16 @@ See `_ease()` for definitions.
 """
 from __future__ import annotations
 
+import base64
+import difflib
+import json
 import math
 import os
 import queue
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Dict, List, Optional
 
 # ---------------------------------------------------------------------------
@@ -36,7 +40,6 @@ from typing import Dict, List, Optional
 try:
     from dotenv import load_dotenv
     # Try repo root first, then fall back to cwd (Webots controller cwd is this dir)
-    from pathlib import Path
     _here = Path(__file__).resolve().parent
     for env_candidate in (_here.parent.parent.parent / '.env', _here / '.env'):
         if env_candidate.exists():
@@ -57,6 +60,7 @@ from controller import Supervisor
 import config
 from frame_buffer import FrameBuffer
 from idle_animator import IdleAnimator
+from fallback import FallbackPolicy
 from sandbox_exec import SandboxExecutor
 from vlm_trigger import VLMTrigger
 
@@ -125,7 +129,23 @@ class NaoVlmAPI:
         }
         self.q_current = pin.neutral(self.model)
         self.current_posture = 'stand'
-        self._aborted = False   # set to True when robot.step returns -1
+        self._aborted = False
+
+    def _normalize_arm_side(self, side: str) -> str:
+        if not isinstance(side, str):
+            return side
+        normalized = side.strip().lower()
+        alias_map = {
+            'l': 'left',
+            'left': 'left',
+            'left_arm': 'left',
+            'left_hand': 'left',
+            'r': 'right',
+            'right': 'right',
+            'right_arm': 'right',
+            'right_hand': 'right',
+        }
+        return alias_map.get(normalized, side)
 
     # ------------------------------------------------------------------ internals
 
@@ -157,6 +177,33 @@ class NaoVlmAPI:
                                  mx - self._LIMIT_MARGIN_RAD))
         return float(angle)
 
+    def _canonicalize_joint_name(self, name: str) -> Optional[str]:
+        if name in self.motors:
+            return name
+        if not isinstance(name, str):
+            return None
+
+        normalized = ''.join(ch for ch in name if ch.isalnum()).lower()
+        exact_normalized = {}
+        for joint_name in self.motors:
+            key = ''.join(ch for ch in joint_name if ch.isalnum()).lower()
+            exact_normalized[key] = joint_name
+
+        if normalized in exact_normalized:
+            return exact_normalized[normalized]
+
+        candidates = difflib.get_close_matches(
+            normalized,
+            list(exact_normalized.keys()),
+            n=1,
+            cutoff=0.72,
+        )
+        if not candidates:
+            return None
+        resolved = exact_normalized[candidates[0]]
+        print(f'[NaoVlmAPI] joint alias resolved: {name!r} -> {resolved!r}')
+        return resolved
+
     # ------------------------------------------------------------------ introspection
 
     def get_joint_limits(self) -> Dict[str, tuple]:
@@ -178,6 +225,23 @@ class NaoVlmAPI:
                          if 'HeadYaw' in self.motors else 0.0),
         }
         return state
+
+    def _side_arm_joint_names(self, side: str) -> List[str]:
+        prefix = 'L' if side == 'left' else 'R'
+        return [
+            f'{prefix}ShoulderPitch',
+            f'{prefix}ShoulderRoll',
+            f'{prefix}ElbowYaw',
+            f'{prefix}ElbowRoll',
+            f'{prefix}WristYaw',
+        ]
+
+    def _joint_velocity_indices(self, joint_name: str) -> List[int]:
+        if joint_name not in self.model.names:
+            return []
+        jid = self.model.getJointId(joint_name)
+        joint = self.model.joints[jid]
+        return list(range(joint.idx_v, joint.idx_v + joint.nv))
 
     def capture_camera_image(self, save_path: str = 'vlm_view.jpg') -> str:
         if 'CameraTop' not in self.cameras:
@@ -201,7 +265,8 @@ class NaoVlmAPI:
 
     def move_joint(self, name: str, angle: float, duration: float,
                    trajectory: str = 'cubic') -> str:
-        motor = self.motors.get(name)
+        resolved_name = self._canonicalize_joint_name(name)
+        motor = self.motors.get(resolved_name) if resolved_name else None
         if motor is None:
             return f'ERROR: unknown joint {name!r}'
         target = self._clip_to_motor_limits(motor, float(angle))
@@ -213,18 +278,19 @@ class NaoVlmAPI:
             motor.setPosition(start + (target - start) * s)
             if not self._step():
                 return 'ABORTED'
-        return f'OK move_joint {name}->{target:.3f}'
+        return f'OK move_joint {resolved_name}->{target:.3f}'
 
     def move_joints(self, joint_angles: Dict[str, float], duration: float,
                     trajectory: str = 'cubic') -> str:
         segments = {}
         for name, angle in joint_angles.items():
-            motor = self.motors.get(name)
+            resolved_name = self._canonicalize_joint_name(name)
+            motor = self.motors.get(resolved_name) if resolved_name else None
             if motor is None:
                 continue
             start = motor.getTargetPosition()
             target = self._clip_to_motor_limits(motor, float(angle))
-            segments[name] = (motor, start, target)
+            segments[resolved_name] = (motor, start, target)
         if not segments:
             return 'ERROR: no known joints in move_joints'
         dur = max(self.timestep / 1000.0, float(duration))
@@ -239,6 +305,7 @@ class NaoVlmAPI:
 
     def move_arm_ik(self, side: str, xyz, duration: float,
                     orientation=None) -> str:
+        side = self._normalize_arm_side(side)
         if side not in ('left', 'right'):
             return f'ERROR: invalid side {side!r}'
         try:
@@ -248,8 +315,17 @@ class NaoVlmAPI:
 
         frame_id = self.hand_frames[side]
         q = self.q_current.copy()
+        allowed_joint_names = [
+            name for name in self._side_arm_joint_names(side)
+            if name in self.motors and name in self.model.names
+        ]
+        if not allowed_joint_names:
+            return f'ERROR: no controllable arm joints for side={side!r}'
+        allowed_velocity_indices = []
+        for joint_name in allowed_joint_names:
+            allowed_velocity_indices.extend(self._joint_velocity_indices(joint_name))
 
-        # IK: iterate to convergence (keep existing bugfix: lock floating base).
+        # IK: only allow the selected arm chain to move.
         reached = False
         for _ in range(30):
             pin.forwardKinematics(self.model, self.data, q)
@@ -262,14 +338,21 @@ class NaoVlmAPI:
             J = pin.computeFrameJacobian(
                 self.model, self.data, q, frame_id, pin.LOCAL_WORLD_ALIGNED
             )[:3, :]
-            J[:, :6] = 0.0   # lock floating base so the torso doesn't "absorb" the delta
-            dq = np.linalg.pinv(J) @ err
+            enabled = np.zeros(J.shape[1], dtype=bool)
+            for idx in allowed_velocity_indices:
+                if 0 <= idx < J.shape[1]:
+                    enabled[idx] = True
+            J[:, ~enabled] = 0.0
+            damping = 1e-4
+            JJt = J @ J.T + damping * np.eye(J.shape[0])
+            dq = J.T @ np.linalg.solve(JJt, err)
             q = pin.integrate(self.model, q, dq * 0.5)
 
-        # Extract target angles for the Webots motors we control
+        # Extract target angles only for the selected arm so IK never drags
+        # unrelated joints into the motion.
         target_angles = {}
-        for motor_name in self.motors:
-            if motor_name in self.model.names:
+        for motor_name in allowed_joint_names:
+            if motor_name in self.model.names and motor_name in self.motors:
                 jid = self.model.getJointId(motor_name)
                 qi = self.model.joints[jid].idx_q
                 target_angles[motor_name] = float(q[qi])
@@ -283,7 +366,8 @@ class NaoVlmAPI:
     def oscillate_joint(self, name: str, center: float, amplitude: float,
                         frequency: float, duration: float,
                         decay: float = 0.0) -> str:
-        motor = self.motors.get(name)
+        resolved_name = self._canonicalize_joint_name(name)
+        motor = self.motors.get(resolved_name) if resolved_name else None
         if motor is None:
             return f'ERROR: unknown joint {name!r}'
         c = float(center)
@@ -300,7 +384,28 @@ class NaoVlmAPI:
             motor.setPosition(self._clip_to_motor_limits(motor, angle))
             if not self._step():
                 return 'ABORTED'
-        return f'OK oscillate_joint {name}'
+        return f'OK oscillate_joint {resolved_name}'
+
+    def set_hand(self, side: str, openness: float, duration: float,
+                 trajectory: str = 'cubic') -> str:
+        side = self._normalize_arm_side(side)
+        if side not in ('left', 'right'):
+            return f'ERROR: invalid side {side!r}'
+        prefix = 'L' if side == 'left' else 'R'
+        motors = list(self.finger_motors.get(prefix, []))
+        if not motors:
+            return f'ERROR: no finger motors for side={side!r}'
+        target = float(np.clip(openness, 0.0, 1.0))
+        starts = [motor.getTargetPosition() for motor in motors]
+        dur = max(self.timestep / 1000.0, float(duration))
+        steps = max(1, int(round(dur * 1000.0 / self.timestep)))
+        for i in range(1, steps + 1):
+            s = _ease(i / steps, trajectory)
+            for motor, start in zip(motors, starts):
+                motor.setPosition(start + (target - start) * s)
+            if not self._step():
+                return 'ABORTED'
+        return f'OK set_hand {side} openness={target:.2f}'
 
     def hold(self, duration: float) -> str:
         dur = max(self.timestep / 1000.0, float(duration))
@@ -315,19 +420,22 @@ class NaoVlmAPI:
         dur = max(self.timestep / 1000.0, float(duration))
         steps = max(1, int(round(dur * 1000.0 / self.timestep)))
         hy = self.motors.get('HeadYaw')
+        hp = self.motors.get('HeadPitch')
         lsp = self.motors.get('LShoulderPitch')
         rsp = self.motors.get('RShoulderPitch')
         for i in range(1, steps + 1):
             t = (i / steps) * dur
             if hy is not None:
-                hy.setPosition(self._clip_to_motor_limits(hy, 0.08 * math.sin(0.3 * t)))
+                hy.setPosition(self._clip_to_motor_limits(hy, 0.04 * math.sin(0.35 * t)))
+            if hp is not None:
+                hp.setPosition(self._clip_to_motor_limits(hp, 0.03 * math.sin(0.28 * t)))
             # Anti-phase subtle breathing on shoulders
             if lsp is not None:
                 lsp.setPosition(self._clip_to_motor_limits(
-                    lsp, 1.5 + 0.03 * math.sin(0.5 * t)))
+                    lsp, 1.45 + 0.015 * math.sin(0.45 * t)))
             if rsp is not None:
                 rsp.setPosition(self._clip_to_motor_limits(
-                    rsp, 1.5 + 0.03 * math.sin(0.5 * t + math.pi)))
+                    rsp, 1.45 + 0.015 * math.sin(0.45 * t + math.pi)))
             if not self._step():
                 return 'ABORTED'
         return f'OK idle {duration:.2f}s'
@@ -423,6 +531,19 @@ class VLMWorker:
         t.start()
         return True
 
+    def kick_with_frames(self, frames: List[str]) -> bool:
+        if self._in_flight.is_set():
+            return False
+        if not frames:
+            return False
+        self._in_flight.set()
+        self.total_calls += 1
+        t = threading.Thread(
+            target=self._run, args=(list(frames),), name='VLMWorker', daemon=True
+        )
+        t.start()
+        return True
+
     def _run(self, frames: List[str]) -> None:
         try:
             rsp = self.client.call(frames)
@@ -493,6 +614,278 @@ def _bind_devices(robot: Supervisor, model, timestep: int):
     return cameras, motors, sensors, joint_q_idx_map, finger_motors
 
 
+def _wait_for_frame_buffer(
+    robot: Supervisor,
+    vlm_api: NaoVlmAPI,
+    buffer: FrameBuffer,
+    timestep: int,
+    timeout_s: float,
+) -> bool:
+    deadline = time.time() + max(0.1, timeout_s)
+    while time.time() < deadline:
+        if robot.step(timestep) == -1:
+            return False
+        vlm_api._sync_sensors()
+        if len(buffer) >= config.VLM_FRAME_COUNT:
+            return True
+    return False
+
+
+def _is_video_file_source(source) -> bool:
+    if isinstance(source, int):
+        return False
+    if not isinstance(source, str):
+        return False
+    if '://' in source:
+        return False
+    suffix = Path(source).suffix.lower()
+    return suffix in {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v'}
+
+
+def _wait_for_video_progress(
+    robot: Supervisor,
+    vlm_api: NaoVlmAPI,
+    buffer: FrameBuffer,
+    timestep: int,
+    settle_s: float,
+) -> bool:
+    deadline = time.time() + max(0.0, settle_s)
+    while time.time() < deadline:
+        if robot.step(timestep) == -1:
+            return False
+        vlm_api._sync_sensors()
+        if not buffer.is_alive and len(buffer) >= config.VLM_FRAME_COUNT:
+            return True
+    return True
+
+
+def _write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding='utf-8')
+
+
+def _sample_frames_from_video_file(path: str, n: int) -> List[str]:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        return []
+
+    frames: List[np.ndarray] = []
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                break
+            frames.append(frame)
+    finally:
+        cap.release()
+
+    if len(frames) < max(1, n):
+        return []
+
+    indices = np.linspace(0, len(frames) - 1, n).astype(int)
+    out: List[str] = []
+    for idx in indices:
+        ok, buf = cv2.imencode('.jpg', frames[int(idx)], [cv2.IMWRITE_JPEG_QUALITY, 80])
+        if not ok:
+            continue
+        out.append(base64.b64encode(buf.tobytes()).decode('ascii'))
+    return out
+
+
+def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None) -> Path:
+    out_dir = config.ARTIFACTS_DIR / time.strftime('%Y%m%d_%H%M%S')
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for index, img_b64 in enumerate(frames_b64, start=1):
+        try:
+            (out_dir / f'frame_{index:02d}.jpg').write_bytes(base64.b64decode(img_b64))
+        except Exception as e:
+            _write_text(out_dir / f'frame_{index:02d}.error.txt', str(e))
+
+    semantic_json = json.dumps(rsp.semantic_context or {}, ensure_ascii=False, indent=2)
+    _write_text(out_dir / 'semantic_context.json', semantic_json)
+    _write_text(out_dir / 'python_code.py', rsp.python_code or '')
+    _write_text(out_dir / 'raw_response.txt', rsp.raw_text or '')
+
+    summary = [
+        f'ok={rsp.ok}',
+        f'elapsed_seconds={rsp.elapsed_seconds:.3f}',
+        f'error={rsp.error}',
+    ]
+    if exec_result is not None:
+        summary.extend([
+            f'exec_ok={exec_result.ok}',
+            f'exec_elapsed_seconds={exec_result.elapsed_seconds:.3f}',
+            f'exec_error={exec_result.error}',
+        ])
+        if exec_result.traceback:
+            _write_text(out_dir / 'execution_traceback.txt', exec_result.traceback)
+    _write_text(out_dir / 'summary.txt', '\n'.join(summary) + '\n')
+    return out_dir
+
+
+def _run_oneshot_demo(
+    robot: Supervisor,
+    timestep: int,
+    vlm_api: NaoVlmAPI,
+    buffer: Optional[FrameBuffer],
+    client,
+    executor: SandboxExecutor,
+) -> None:
+    if buffer is None:
+        print('[oneshot] ERROR: oneshot mode requires INPUT_MODE=webcam/video source.')
+        return
+    if client is None:
+        print('[oneshot] ERROR: VLM client unavailable; check SDK and llm_api_key.')
+        return
+
+    print(f'[oneshot] waiting for at least {config.VLM_FRAME_COUNT} frames...')
+    ready = _wait_for_frame_buffer(
+        robot=robot,
+        vlm_api=vlm_api,
+        buffer=buffer,
+        timestep=timestep,
+        timeout_s=config.ONE_SHOT_BUFFER_TIMEOUT,
+    )
+    if not ready:
+        print('[oneshot] ERROR: frame buffer did not fill before timeout or simulation ended.')
+        return
+
+    if _is_video_file_source(config.WEBCAM_SOURCE):
+        settle_s = config.ONE_SHOT_VIDEO_SETTLE_SECONDS
+        if settle_s <= 0.0:
+            settle_s = max(config.VLM_WINDOW_SECONDS, config.FRAME_BUFFER_SECONDS)
+        print(f'[oneshot] video source detected; allowing playback to progress for {settle_s:.2f}s before sampling...')
+        if not _wait_for_video_progress(
+            robot=robot,
+            vlm_api=vlm_api,
+            buffer=buffer,
+            timestep=timestep,
+            settle_s=settle_s,
+        ):
+            print('[oneshot] ERROR: simulation ended while waiting for video progress.')
+            return
+
+        direct_frames = _sample_frames_from_video_file(config.WEBCAM_SOURCE, config.VLM_FRAME_COUNT)
+        if direct_frames:
+            frames = direct_frames
+            print(f'[oneshot] sampled {len(frames)} frame(s) directly from source video {config.WEBCAM_SOURCE!r}')
+        else:
+            frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
+            print(f'[oneshot] fallback to buffer sampling: {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
+    else:
+        frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
+
+    if not frames:
+        print('[oneshot] ERROR: failed to sample frames from buffer.')
+        return
+
+    if not _is_video_file_source(config.WEBCAM_SOURCE):
+        print(f'[oneshot] sampled {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
+    print('[oneshot] sending frames to VLM...')
+    result_queue: queue.Queue = queue.Queue(maxsize=1)
+
+    def _call_vlm() -> None:
+        try:
+            result_queue.put(client.call(frames))
+        except Exception as e:
+            result_queue.put(e)
+
+    threading.Thread(target=_call_vlm, name='OneShotVLM', daemon=True).start()
+
+    rsp = None
+    deadline = time.time() + max(1.0, config.ONE_SHOT_VLM_TIMEOUT)
+    while time.time() < deadline:
+        try:
+            rsp = result_queue.get_nowait()
+            break
+        except queue.Empty:
+            pass
+
+        if robot.step(timestep) == -1:
+            print('[oneshot] simulation ended while waiting for VLM.')
+            return
+        vlm_api._sync_sensors()
+
+    if rsp is None:
+        print(f'[oneshot] ERROR: VLM call timed out after {config.ONE_SHOT_VLM_TIMEOUT:.1f}s')
+        return
+    if isinstance(rsp, Exception):
+        print(f'[oneshot] ERROR: unexpected VLM exception: {rsp}')
+        return
+
+    if rsp.ok:
+        print(f'[oneshot] VLM done in {rsp.elapsed_seconds:.2f}s')
+        print(f'[oneshot] semantic context: {rsp.semantic_context}')
+        print(f'[oneshot] code:\n{rsp.python_code}\n')
+        exec_result = executor.run(rsp.python_code)
+        if (not exec_result.ok) and hasattr(client, 'repair'):
+            print(f'[oneshot] first execution failed, asking local VLM to repair: {exec_result.error}')
+            repaired_rsp = client.repair(
+                frames,
+                rsp.semantic_context,
+                rsp.python_code,
+                exec_result.error or 'execution_failed',
+            )
+            if repaired_rsp.ok:
+                print(f'[oneshot] repaired semantic context: {repaired_rsp.semantic_context}')
+                print(f'[oneshot] repaired code:\n{repaired_rsp.python_code}\n')
+                repaired_exec_result = executor.run(repaired_rsp.python_code)
+                if repaired_exec_result.ok:
+                    rsp = repaired_rsp
+                    exec_result = repaired_exec_result
+                else:
+                    print(f'[oneshot] repaired execution still failed: {repaired_exec_result.error}')
+        artifact_dir = _save_oneshot_artifacts(frames, rsp, exec_result)
+        if exec_result.ok:
+            print(f'[oneshot] execution OK in {exec_result.elapsed_seconds:.2f}s')
+        else:
+            print(f'[oneshot] execution FAILED: {exec_result.error}')
+            if exec_result.traceback:
+                print(exec_result.traceback)
+        print(f'[oneshot] artifacts saved to: {artifact_dir}')
+    else:
+        artifact_dir = _save_oneshot_artifacts(frames, rsp)
+        print(f'[oneshot] VLM FAILED: {rsp.error}')
+        print(f'[oneshot] artifacts saved to: {artifact_dir}')
+
+    if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
+        print('[oneshot] done; exiting controller.')
+
+
+def _run_replay_demo(robot: Supervisor, timestep: int, vlm_api: NaoVlmAPI, executor: SandboxExecutor) -> None:
+    code_path = Path(config.REPLAY_CODE_PATH).expanduser()
+    if not code_path.is_absolute():
+        code_path = (Path(__file__).resolve().parent.parent.parent.parent / code_path).resolve()
+    if not code_path.exists():
+        print(f'[replay] ERROR: code file not found: {code_path}')
+        return
+
+    code = code_path.read_text(encoding='utf-8')
+    if not code.strip():
+        print(f'[replay] ERROR: code file is empty: {code_path}')
+        return
+
+    if config.REPLAY_START_DELAY > 0.0:
+        print(f'[replay] waiting {config.REPLAY_START_DELAY:.2f}s before execution...')
+        steps = max(1, int(round(config.REPLAY_START_DELAY * 1000.0 / timestep)))
+        for _ in range(steps):
+            if robot.step(timestep) == -1:
+                print('[replay] simulation ended during start delay.')
+                return
+            vlm_api._sync_sensors()
+
+    print(f'[replay] executing precomputed code from: {code_path}')
+    print(f'[replay] code:\n{code}\n')
+    result = executor.run(code)
+    if result.ok:
+        print(f'[replay] execution OK in {result.elapsed_seconds:.2f}s')
+    else:
+        print(f'[replay] execution FAILED: {result.error}')
+        if result.traceback:
+            print(result.traceback)
+
+
 def main():
     print('\n' + '=' * 60)
     print(' NAO VLM Embodied Controller')
@@ -530,38 +923,88 @@ def main():
             source=config.WEBCAM_SOURCE,
             buffer_seconds=config.FRAME_BUFFER_SECONDS,
             fps=config.FRAME_BUFFER_FPS,
+            backend=config.FRAMEBUFFER_BACKEND,
+            frame_width=config.FRAMEBUFFER_WIDTH,
+            frame_height=config.FRAMEBUFFER_HEIGHT,
         ).start()
     else:
         print(f'[init] INPUT_MODE={config.INPUT_MODE} - FrameBuffer disabled')
 
     # 5. VLM client + worker
+    client = None
     worker: Optional[VLMWorker] = None
     if _VLM_IMPORT_OK and buffer is not None:
         try:
             client = VLMClient(joint_limits=vlm_api.get_joint_limits())
-            worker = VLMWorker(client, buffer)
             print(f'[init] VLMClient ready, model={client.model}')
         except Exception as e:
             print(f'[init] VLMClient disabled: {e}')
+            client = None
             worker = None
+    if client is not None and buffer is not None and config.RUN_MODE != 'oneshot':
+        worker = VLMWorker(client, buffer)
 
     # 6. Sandbox executor
     executor = SandboxExecutor()
+    executor.set_joint_limits(vlm_api.get_joint_limits())
+
+    def operate_gripper(side: str, action: str) -> str:
+        normalized_side = vlm_api._normalize_arm_side(side)
+        normalized_action = str(action).strip().lower()
+        if normalized_action not in {'open', 'close'}:
+            return f'ERROR: invalid gripper action {action!r}'
+        openness = 1.0 if normalized_action == 'open' else 0.0
+        return vlm_api.set_hand(normalized_side, openness, duration=0.25, trajectory='cubic')
+
+    def move_head(yaw: float, pitch: float, duration: float = 0.2, trajectory: str = 'min_jerk') -> str:
+        return vlm_api.move_joints(
+            {
+                'HeadYaw': float(yaw),
+                'HeadPitch': float(pitch),
+            },
+            duration=float(duration),
+            trajectory=trajectory,
+        )
+
     executor.register_many({
         'move_joint': vlm_api.move_joint,
         'move_joints': vlm_api.move_joints,
         'move_arm_ik': vlm_api.move_arm_ik,
+        'move_head': move_head,
+        'set_hand': vlm_api.set_hand,
+        'operate_gripper': operate_gripper,
         'oscillate_joint': vlm_api.oscillate_joint,
         'hold': vlm_api.hold,
         'idle': vlm_api.idle,
-        'speak': vlm_api.speak,
-        # Legacy aliases so existing prompts still work:
-        'look_at': vlm_api.look_at,
-        'move_arm': vlm_api.move_arm,
-        'operate_gripper': vlm_api.operate_gripper,
-        'set_posture': vlm_api.set_posture,
     })
     print(f'[init] sandbox exposes: {executor.registered_names}')
+
+    fallback = FallbackPolicy(idle_fn=vlm_api.idle)
+
+    if config.RUN_MODE == 'replay':
+        print('[init] run mode: replay')
+        try:
+            _run_replay_demo(robot, timestep, vlm_api, executor)
+        finally:
+            if buffer is not None:
+                buffer.stop()
+        return
+
+    if config.RUN_MODE == 'oneshot':
+        print('[init] run mode: oneshot')
+        try:
+            _run_oneshot_demo(
+                robot=robot,
+                timestep=timestep,
+                vlm_api=vlm_api,
+                buffer=buffer,
+                client=client,
+                executor=executor,
+            )
+        finally:
+            if buffer is not None:
+                buffer.stop()
+        return
 
     # 7. State-aware trigger + idle animator
     trigger: Optional[VLMTrigger] = None
@@ -581,6 +1024,7 @@ def main():
 
     # 8. Main loop
     step_count = 0
+    last_trigger_frames: List[str] = []
     print(f'[init] main loop entering. State-aware trigger active. '
           f'Press Ctrl-C or stop Webots to exit.\n')
 
@@ -602,6 +1046,7 @@ def main():
             if not worker.in_flight:
                 reason = trigger.consider_trigger()
                 if reason is not None and worker.kick():
+                    last_trigger_frames = buffer.sample_recent(config.VLM_FRAME_COUNT) if buffer is not None else []
                     trigger.confirm_fire(reason)
                     trigger.mark_executing()
                     buf_stats = buffer.stats() if buffer else {}
@@ -621,17 +1066,28 @@ def main():
                     result = executor.run(rsp.python_code)
                     if result.ok:
                         print(f'[VLM] exec OK in {result.elapsed_seconds:.2f}s')
+                        fallback.record_success(rsp)
                     else:
                         print(f'[VLM] exec FAILED: {result.error}')
                         if result.traceback:
                             print(result.traceback)
+                        decision = fallback.handle_failure(f'exec_failed:{result.error}')
+                        if decision.action == 'retry' and worker is not None and last_trigger_frames:
+                            print(f'[fallback] tier A retry after exec failure: {decision.reason}')
+                            if worker.kick_with_frames(last_trigger_frames):
+                                trigger.mark_executing()
+                                continue
                     # Whether exec succeeded or failed, open the post-action
                     # observation window so we see the human's reaction.
                     trigger.mark_action_done()
                 else:
                     print(f'[VLM] call failed: {rsp.error}  (raw={rsp.raw_text[:200]!r})')
-                    # Call failed before any motion happened - back to IDLE
-                    # so we can retry on next motion event.
+                    decision = fallback.handle_failure(f'call_failed:{rsp.error}')
+                    if decision.action == 'retry' and worker is not None and last_trigger_frames:
+                        print(f'[fallback] tier A retry after call failure: {decision.reason}')
+                        if worker.kick_with_frames(last_trigger_frames):
+                            trigger.mark_executing()
+                            continue
                     trigger.mark_idle()
 
     # Shutdown

@@ -1,0 +1,22 @@
+name: humanoid_robot_vlm_darian
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - numpy>=1.21
+  - opencv
+  - flask>=2.3
+  - python-dotenv>=1.0
+  - pinocchio
+  - pip
+  - pip:
+      - openai>=1.0.0
+      - torch
+      - torchvision
+      - torchaudio
+      - transformers
+      - accelerate
+      - decord
+      - sentencepiece
+      - safetensors
+      - num2words
