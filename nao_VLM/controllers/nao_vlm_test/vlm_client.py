@@ -81,6 +81,11 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 
     move_arm_ik(side: str, xyz: list, duration: float)
 
+    move_head(yaw: float, pitch: float, duration: float = 0.2,
+              trajectory: str = 'min_jerk')
+        # Convenience over move_joints with HeadYaw + HeadPitch keys.
+        # yaw +ve looks LEFT, -ve looks RIGHT. pitch +ve looks DOWN, -ve looks UP.
+
     set_hand(side: str, openness: float, duration: float,
              trajectory: str = 'cubic')
 
@@ -146,17 +151,55 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - For pet-like responses, prefer one readable gesture with a short settle rather
   than several large disjoint posture changes.
 
+# Concrete examples (treat as templates, NOT recipes to copy)
+
+# Each example shows ONE valid composition for the noted motion_dynamics. Use
+# these to anchor parameter ranges; the actual numbers should adapt to the
+# clip you observe (amplitude, duration, side, joint set).
+
+## Example 1 — motion_dynamics = "oscillatory" (e.g. greeting wave back)
+# Lift right arm, oscillate the elbow with light decay, return to rest.
+move_arm_ik('right', xyz=[0.15, -0.15, 0.10], duration=0.4)
+oscillate_joint('RElbowRoll', center=1.0, amplitude=0.5,
+                frequency=2.0, duration=1.5, decay=0.3)
+move_arm_ik('right', xyz=[0.02, -0.10, -0.20], duration=0.4)
+
+## Example 2 — motion_dynamics = "static" with curious affect
+# Small attentive head cue, brief settle. NO arms when the clip is just a
+# still pose — moving arms here would feel forced. The first move_head MUST
+# have a non-trivial yaw or pitch (>=0.10 rad in magnitude); a no-op
+# (yaw=0, pitch=0) is rejected by the safety validator and counted as a
+# fallback. Vary the angle direction with the human's apparent attention.
+move_head(yaw=0.18, pitch=-0.05, duration=0.4, trajectory='min_jerk')
+hold(0.6)
+move_head(yaw=-0.10, pitch=0.0, duration=0.4, trajectory='min_jerk')
+
+## Example 3 — motion_dynamics = "approaching" with neutral/cautious affect
+# Lean upper body slightly back via shoulder pitch (NO lower-body joints) and
+# raise dominant hand in a soft "wait" posture. Use min_jerk for elegance.
+move_joints({{'LShoulderPitch': 1.6, 'RShoulderPitch': 1.6,
+             'HeadPitch': -0.05}},
+            duration=0.5, trajectory='min_jerk')
+move_arm_ik('right', xyz=[0.12, -0.10, 0.05], duration=0.4)
+set_hand('right', openness=0.7, duration=0.3)
+hold(0.5)
+
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
 
 ```json
 {{
-  "intent": "<short free-form description of what the human is doing>",
+  "intent": "<short description of what the HUMAN is doing>",
   "social_distance": "close" | "medium" | "far",
   "affect": "<happy|neutral|hostile|sad|curious|etc.>",
   "confidence": <float 0.0-1.0>,
   "motion_dynamics": "oscillatory" | "approaching" | "retreating" |
-                     "raising" | "lowering" | "static"
+                     "raising" | "lowering" | "static",
+  "robot_intent": "<short description of how the ROBOT should respond, in
+                   plain English; should match what the Python code below
+                   actually does — e.g. 'wave back with right hand, warm
+                   tone' or 'tilt head curiously and hold' or 'lean back,
+                   raise open palm in caution'>"
 }}
 ```
 
@@ -207,7 +250,7 @@ Rules:
 - Keep the robot fully controlled by VLM-generated code.
 - Do not use any intermediate gesture labels.
 - Do not use canned named actions.
-- Use only these primitives: move_joint, move_joints, move_arm_ik, set_hand, oscillate_joint, hold, idle.
+- Use only these primitives: move_joint, move_joints, move_arm_ik, move_head, set_hand, oscillate_joint, hold, idle.
 - Do NOT use lower-body joints.
 - Prefer smooth upper-body motion only: head, shoulders, elbows, wrists, hands.
 - Keep the motion short, natural, pet-like, and physically plausible.
@@ -234,7 +277,7 @@ Use the SAME video frames and produce a BETTER grounded result.
 Rules:
 - Keep the robot fully controlled by VLM-generated code.
 - Do not use intermediate gesture labels or canned named actions.
-- Use only these primitives: move_joint, move_joints, move_arm_ik, set_hand, oscillate_joint, hold, idle.
+- Use only these primitives: move_joint, move_joints, move_arm_ik, move_head, set_hand, oscillate_joint, hold, idle.
 - Do NOT use lower-body joints.
 - The new code must differ materially from the previous code if the previous code was too generic.
 - Avoid a wrist-only oscillation unless the video truly supports it.

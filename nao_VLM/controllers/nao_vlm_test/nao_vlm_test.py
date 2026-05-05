@@ -948,14 +948,6 @@ def main():
     executor = SandboxExecutor()
     executor.set_joint_limits(vlm_api.get_joint_limits())
 
-    def operate_gripper(side: str, action: str) -> str:
-        normalized_side = vlm_api._normalize_arm_side(side)
-        normalized_action = str(action).strip().lower()
-        if normalized_action not in {'open', 'close'}:
-            return f'ERROR: invalid gripper action {action!r}'
-        openness = 1.0 if normalized_action == 'open' else 0.0
-        return vlm_api.set_hand(normalized_side, openness, duration=0.25, trajectory='cubic')
-
     def move_head(yaw: float, pitch: float, duration: float = 0.2, trajectory: str = 'min_jerk') -> str:
         return vlm_api.move_joints(
             {
@@ -966,13 +958,17 @@ def main():
             trajectory=trajectory,
         )
 
+    # Active primitive set (matches the VLM prompt). Legacy duplicates
+    # (operate_gripper -> set_hand, look_at -> move_head, move_arm -> move_arm_ik,
+    # set_posture -> upper-body composition) are intentionally NOT registered so
+    # the VLM cannot accidentally pick deprecated paths or bypass the
+    # forbidden-lower-body invariant enforced by SandboxExecutor.validate().
     executor.register_many({
         'move_joint': vlm_api.move_joint,
         'move_joints': vlm_api.move_joints,
         'move_arm_ik': vlm_api.move_arm_ik,
         'move_head': move_head,
         'set_hand': vlm_api.set_hand,
-        'operate_gripper': operate_gripper,
         'oscillate_joint': vlm_api.oscillate_joint,
         'hold': vlm_api.hold,
         'idle': vlm_api.idle,
@@ -1061,7 +1057,17 @@ def main():
             rsp = worker.poll()
             if rsp is not None:
                 if rsp.ok:
-                    print(f'[VLM] {rsp.elapsed_seconds:.2f}s  ctx={rsp.semantic_context}')
+                    ctx = rsp.semantic_context or {}
+                    md = ctx.get('motion_dynamics', '?')
+                    aff = ctx.get('affect', '?')
+                    dist = ctx.get('social_distance', '?')
+                    conf = ctx.get('confidence', '?')
+                    human_intent = ctx.get('intent', '(not set)')
+                    robot_intent = ctx.get('robot_intent', '(not set)')
+                    print(f'[VLM] {rsp.elapsed_seconds:.2f}s  '
+                          f'{md}/{aff}/{dist}  conf={conf}')
+                    print(f'[VLM]   human: {human_intent}')
+                    print(f'[VLM]   robot: {robot_intent}')
                     print(f'[VLM] code:\n{rsp.python_code}\n')
                     result = executor.run(rsp.python_code)
                     if result.ok:
@@ -1077,6 +1083,15 @@ def main():
                             if worker.kick_with_frames(last_trigger_frames):
                                 trigger.mark_executing()
                                 continue
+                        elif decision.action == 'replay':
+                            print(f'[fallback] tier B replay after exec failure: {decision.reason}')
+                            replay_result = executor.run(decision.python_code)
+                            if replay_result.ok:
+                                print(f'[fallback] replay exec OK in {replay_result.elapsed_seconds:.2f}s')
+                            else:
+                                print(f'[fallback] replay exec FAILED: {replay_result.error}')
+                        # decision.action == 'idle' was already handled by
+                        # handle_failure (it ran idle internally).
                     # Whether exec succeeded or failed, open the post-action
                     # observation window so we see the human's reaction.
                     trigger.mark_action_done()
@@ -1088,6 +1103,17 @@ def main():
                         if worker.kick_with_frames(last_trigger_frames):
                             trigger.mark_executing()
                             continue
+                    elif decision.action == 'replay':
+                        print(f'[fallback] tier B replay after call failure: {decision.reason}')
+                        replay_result = executor.run(decision.python_code)
+                        if replay_result.ok:
+                            print(f'[fallback] replay exec OK in {replay_result.elapsed_seconds:.2f}s')
+                        else:
+                            print(f'[fallback] replay exec FAILED: {replay_result.error}')
+                        # After a replay, open the post-action window so we
+                        # observe the human's reaction to the cached response.
+                        trigger.mark_action_done()
+                        continue
                     trigger.mark_idle()
 
     # Shutdown
