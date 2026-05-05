@@ -9,6 +9,9 @@ pin>=3.0.0
 # VLM client
 openai>=1.0.0
 python-dotenv>=1.0.0
+# Used for the optional LOCAL_VLM_SERVER_URL HTTP backend in vlm_client.py;
+# imported at module top level, so it must be installed even when using cloud GPT-4o.
+requests>=2.28.0
 
 # Local camera server (only needed on the laptop streaming to cloud)
 flask>=2.3.0

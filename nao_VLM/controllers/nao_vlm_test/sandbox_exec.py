@@ -187,6 +187,33 @@ class SandboxExecutor:
                             if not (limits[0] <= float(angle) <= limits[1]):
                                 return ValidationResult(False, error=f'joint_limit_violation: {joint_name}={angle}')
 
+            if fn_name == 'move_head':
+                # Reject literal head no-ops (yaw=0 AND pitch=0). Without this
+                # check the VLM tends to settle on `move_head(0.0, 0.0)` for
+                # static clips, parroting the example structure but zeroing
+                # the values — a visibly-frozen response that fails the
+                # "no zero-angle no-op" guidance in the prompt.
+                allowed_keywords = {'yaw', 'pitch', 'duration', 'trajectory'}
+                unknown_keywords = [kw.arg for kw in node.keywords if kw.arg and kw.arg not in allowed_keywords]
+                if unknown_keywords:
+                    return ValidationResult(False, error=f'unknown_move_head_kwargs: {unknown_keywords[0]}')
+                yaw = self._literal(node.args[0]) if len(node.args) >= 1 else self._keyword_literal(node, 'yaw')
+                pitch = self._literal(node.args[1]) if len(node.args) >= 2 else self._keyword_literal(node, 'pitch')
+                duration = self._literal(node.args[2]) if len(node.args) >= 3 else self._keyword_literal(node, 'duration')
+                if yaw is not None and not isinstance(yaw, (int, float)):
+                    return ValidationResult(False, error='non_scalar_yaw: move_head')
+                if pitch is not None and not isinstance(pitch, (int, float)):
+                    return ValidationResult(False, error='non_scalar_pitch: move_head')
+                if duration is not None and not isinstance(duration, (int, float)):
+                    return ValidationResult(False, error='non_scalar_duration: move_head')
+                if isinstance(duration, (int, float)) and not (0.05 <= float(duration) <= 3.0):
+                    return ValidationResult(False, error=f'invalid_duration: move_head={duration}')
+                # Only flag the no-op when BOTH literal angles are tiny. If
+                # either is non-literal (e.g. a loop variable) we leave it.
+                if isinstance(yaw, (int, float)) and isinstance(pitch, (int, float)):
+                    if abs(float(yaw)) < 0.05 and abs(float(pitch)) < 0.05:
+                        return ValidationResult(False, error='move_head_no_op_zero_angles')
+
             if fn_name == 'oscillate_joint':
                 oscillation_calls += 1
                 allowed_keywords = {'name', 'center', 'amplitude', 'frequency', 'duration', 'decay'}
