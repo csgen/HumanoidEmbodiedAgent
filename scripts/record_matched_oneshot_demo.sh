@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="/home/darian/桌面/humanoidRobot"
-PYTHON_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/python"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-python3}"
 RECORD_DEMO_SCRIPT="$REPO_DIR/scripts/record_precomputed_side_by_side_demo.sh"
 
-VIDEO_PATH="${1:?请传入视频路径}"
-OUT_MP4="${2:?请传入输出 mp4 路径}"
+VIDEO_PATH="${1:?Please provide video path [请传入视频路径]}"
+OUT_MP4="${2:?Please provide output mp4 path [请传入输出 mp4 路径]}"
 
 MATCHED_DIR="$($PYTHON_BIN - "$VIDEO_PATH" <<'PY'
 from pathlib import Path
 import cv2, numpy as np, sys
 
-repo = Path('/home/darian/桌面/humanoidRobot')
+repo = Path(__file__).resolve().parent.parent
 video = Path(sys.argv[1]).resolve()
 artifacts = sorted([p for p in (repo/'artifacts/oneshot').iterdir() if p.is_dir()])
 
@@ -67,7 +68,7 @@ PY
 )"
 
 if [[ -z "$MATCHED_DIR" || ! -f "$MATCHED_DIR/python_code.py" ]]; then
-  echo "[错误] 未找到匹配的历史 VLM 产物。"
+  echo "[Error] [错误] Did not find matching historical VLM artifacts. [未找到匹配的历史 VLM 产物。]"
   exit 1
 fi
 

@@ -11,7 +11,7 @@ import numpy as np
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='录制桌面区域为 mp4')
+    parser = argparse.ArgumentParser(description='Record desktop region to mp4 [录制桌面区域为 mp4]')
     parser.add_argument('--x', type=int, required=True)
     parser.add_argument('--y', type=int, required=True)
     parser.add_argument('--width', type=int, required=True)
@@ -37,7 +37,7 @@ def main():
         (int(args.width), int(args.height)),
     )
     if not writer.isOpened():
-        raise RuntimeError(f'无法写入视频: {args.output}')
+        raise RuntimeError(f'Cannot write to video: [无法写入视频:] {args.output}')
 
     region = {
         'left': int(args.x),
@@ -69,7 +69,7 @@ def main():
 
                 if consecutive_black_frames >= int(args.max_consecutive_black_frames):
                     raise RuntimeError(
-                        '检测到连续黑屏帧，桌面可能已休眠、锁屏或显示输出关闭，停止录制。'
+                        'Continuous black frames detected, desktop may be asleep, locked, or display off. Stopping recording. [检测到连续黑屏帧，桌面可能已休眠、锁屏或显示输出关闭，停止录制。]'
                     )
 
                 writer.write(frame)

@@ -58,6 +58,7 @@ class SandboxExecutor:
         # if it wants; primitives themselves are blocking so this is rare.
         self._extras: Dict[str, Any] = {'time': time}
         self._joint_limits: Dict[str, tuple] = {}
+        self._metrics_recorder = None
         self._walking_forbidden = True
         self._forbidden_joints = {
             'LHipYawPitch', 'LHipRoll', 'LHipPitch', 'LKneePitch', 'LAnklePitch', 'LAnkleRoll',
@@ -82,6 +83,24 @@ class SandboxExecutor:
 
     def set_joint_limits(self, joint_limits: Dict[str, tuple]) -> None:
         self._joint_limits = dict(joint_limits or {})
+
+    def set_metrics_recorder(self, recorder) -> None:
+        self._metrics_recorder = recorder
+
+    def _record_event(self, event: str, *, error: Optional[str] = None,
+                      elapsed_seconds: Optional[float] = None,
+                      code: str = '') -> None:
+        if self._metrics_recorder is None:
+            return
+        try:
+            self._metrics_recorder.record_sandbox_event(
+                event,
+                error=error,
+                elapsed_seconds=elapsed_seconds,
+                code=code,
+            )
+        except Exception as exc:
+            print(f'[metrics] sandbox event logging failed: {exc}')
 
     def _literal(self, node):
         try:
@@ -319,7 +338,9 @@ class SandboxExecutor:
 
         validation = self.validate(code_str)
         if not validation.ok:
+            self._record_event('validate_fail', error=validation.error, code=code_str)
             return SandboxResult(False, 0.0, error=validation.error, traceback=None)
+        self._record_event('validate_pass', code=code_str)
 
         safe_globals = self._build_globals()
         safe_locals: Dict[str, Any] = {}
@@ -329,9 +350,13 @@ class SandboxExecutor:
             exec(code_str, safe_globals, safe_locals)  # noqa: S102 (intentional)
         except Exception as e:
             tb = traceback.format_exc()
-            return SandboxResult(False, time.time() - t0, error=str(e), traceback=tb)
+            elapsed = time.time() - t0
+            self._record_event('exec_error', error=str(e), elapsed_seconds=elapsed, code=code_str)
+            return SandboxResult(False, elapsed, error=str(e), traceback=tb)
 
-        return SandboxResult(True, time.time() - t0)
+        elapsed = time.time() - t0
+        self._record_event('exec_ok', elapsed_seconds=elapsed, code=code_str)
+        return SandboxResult(True, elapsed)
 
     # ------------------------------------------------------------------ introspection
 

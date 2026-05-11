@@ -1,0 +1,10 @@
+.git/
+.switchboard/
+__pycache__/
+*.pyc
+.venv/
+venv/
+artifacts/
+.pytest_cache/
+.mypy_cache/
+.env

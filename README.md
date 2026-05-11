@@ -4,19 +4,19 @@ This is a NAO robot Embodied AI project based on the Webots simulator and the Pi
 
 ## 🌟 Core Features
 - **Parallel Universe Architecture**: Webots handles the physical body and collision execution, while Pinocchio acts as the mathematical cerebellum, calculating inverse kinematics (IK) in real-time.
-- **VLM-Friendly API**: Abstracts complex low-level controls into natural language-level, high-level functions such as `look_at()`, `move_arm()`, and `Maps_to()`.
+- **VLM-Friendly Motion Grammar**: Exposes low-level physical primitives such as `move_joint()`, `move_joints()`, `move_arm_ik()`, `move_head()`, `set_hand()`, `oscillate_joint()`, `hold()`, and `idle()`.
 - **Safety Interception Armor**: Built-in joint limits, self-collision detection, and distance verification to prevent dangerous movements caused by VLM "hallucinations".
 
 ## 🛠️ Environment & Installation
 - Ubuntu 22.04
-- Webots R2023b (or compatible versions)
+- Webots R2025a (world file currently declares `#VRML_SIM R2025a`)
 - Python 3.10+
 - Pinocchio, NumPy, OpenCV
 
 ### 1. Install Webots
 Download the official Webots Debian package for Ubuntu 22.04 from the [Cyberbotics GitHub Releases](https://github.com/cyberbotics/webots/releases). Open your terminal and install it via `apt`:
 ```bash
-sudo apt install ./webots_2023b_amd64.deb
+sudo apt install ./webots_2025a_amd64.deb
 ```
 
 ### 2. Install Python Dependencies
@@ -25,11 +25,8 @@ Install the necessary mathematical and visual processing libraries:
 pip install -r requirements.txt
 ```
 
-### 3. Fetch the Official NAO URDF (Important!)
-Since Pinocchio requires the official NAO physical model to calculate the Center of Mass (CoM) and IK matrices, you must clone the official NAO repository into your project root folder:
-```bash
-git clone [https://github.com/ros-naoqi/nao_robot.git](https://github.com/ros-naoqi/nao_robot.git)
-```
+### 3. NAO URDF
+The needed NAO URDF assets are already present under `nao_VLM/nao_robot/`. Pinocchio uses these files for IK and CoM calculations.
 
 ## 🚀 Quick Start
 
@@ -76,5 +73,51 @@ In `oneshot` mode, the controller samples a short frame sequence from the video,
 calls the VLM once, executes the returned Python primitive sequence once, saves
 artifacts under `artifacts/oneshot/`, and exits.
 
-### 6. 协作与日常使用
+### 6. Phase 5 Evaluation
+Phase 5 adds a reproducible benchmark around `RUN_MODE=oneshot`.
+
+```bash
+python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method cap
+python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method rule_baseline
+python -m evaluation.judge artifacts/eval/*.json --output artifacts/eval/report.md
+```
+
+For Docker-based Linux/Webots evaluation from macOS:
+
+```bash
+docker build -f docker/Dockerfile -t humanoid-webots:phase5 .
+docker run --rm -v "$PWD:/workspace" -e llm_api_key="$OPENAI_API_KEY" \
+  humanoid-webots:phase5 \
+  python3 -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method cap --headless
+```
+
+### 7. Live Camera Demo
+Native Linux webcam:
+
+```bash
+INPUT_MODE=webcam WEBCAM_SOURCE=0 RUN_MODE=periodic webots nao_VLM/worlds/nao_VLM.wbt
+```
+
+Mac camera into Docker or a remote Linux session:
+
+```bash
+python3 scripts/local_camera_server.py --source 0 --port 5000 --fps 10
+# Docker controller: WEBCAM_SOURCE=http://host.docker.internal:5000/video_feed
+# SSH-tunneled remote/HPC controller: WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed
+```
+
+Then launch the live controller with:
+
+```bash
+WEBCAM_SOURCE=0 bash scripts/run_live_camera_demo.sh
+```
+
+### 8. 协作与日常使用
 如果你是协作者，先看 `COLLABORATOR_GUIDE.md`。里面包括当前阶段、常用脚本、以及只推送 `artifacts/screen_recordings_matched/` 的约定。
+
+## 📚 Helpful Resources and Links
+
+- [Webots Official Website](https://cyberbotics.com)
+- [Webots GitHub Repository](https://github.com/cyberbotics/webots)
+- [Webots Installation Guide](https://cyberbotics.com/doc/guide/installation-procedure#from-the-installation-file)
+

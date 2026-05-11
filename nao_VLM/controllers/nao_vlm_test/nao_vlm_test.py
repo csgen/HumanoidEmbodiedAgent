@@ -32,7 +32,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 # ---------------------------------------------------------------------------
 # Load .env before reading config
@@ -61,6 +61,7 @@ import config
 from frame_buffer import FrameBuffer
 from idle_animator import IdleAnimator
 from fallback import FallbackPolicy
+from metrics_recorder import MetricsRecorder
 from sandbox_exec import SandboxExecutor
 from vlm_trigger import VLMTrigger
 
@@ -130,6 +131,7 @@ class NaoVlmAPI:
         self.q_current = pin.neutral(self.model)
         self.current_posture = 'stand'
         self._aborted = False
+        self.metrics_recorder = None
 
     def _normalize_arm_side(self, side: str) -> str:
         if not isinstance(side, str):
@@ -156,12 +158,30 @@ class NaoVlmAPI:
             if idx is not None:
                 self.q_current[idx] = sensor.getValue()
 
+    def set_metrics_recorder(self, recorder) -> None:
+        self.metrics_recorder = recorder
+
+    def _record_metrics_step(self) -> None:
+        if self.metrics_recorder is None:
+            return
+        try:
+            self.metrics_recorder.record_step(
+                sim_time=self.robot.getTime(),
+                q_current=self.q_current,
+                sensors=self.sensors,
+                model=self.model,
+                data=self.data,
+            )
+        except Exception as exc:
+            print(f'[metrics] joint-state logging failed: {exc}')
+
     def _step(self) -> bool:
         """Advance simulation by one timestep, sync sensors. Returns False if sim ended."""
         if self.robot.step(self.timestep) == -1:
             self._aborted = True
             return False
         self._sync_sensors()
+        self._record_metrics_step()
         return True
 
     # Tiny margin keeps us off the exact boundary so Webots's strict `>` float
@@ -626,6 +646,7 @@ def _wait_for_frame_buffer(
         if robot.step(timestep) == -1:
             return False
         vlm_api._sync_sensors()
+        vlm_api._record_metrics_step()
         if len(buffer) >= config.VLM_FRAME_COUNT:
             return True
     return False
@@ -654,6 +675,7 @@ def _wait_for_video_progress(
         if robot.step(timestep) == -1:
             return False
         vlm_api._sync_sensors()
+        vlm_api._record_metrics_step()
         if not buffer.is_alive and len(buffer) >= config.VLM_FRAME_COUNT:
             return True
     return True
@@ -692,8 +714,135 @@ def _sample_frames_from_video_file(path: str, n: int) -> List[str]:
     return out
 
 
-def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None) -> Path:
-    out_dir = config.ARTIFACTS_DIR / time.strftime('%Y%m%d_%H%M%S')
+def _response_payload(rsp) -> dict:
+    if rsp is None:
+        return {}
+    return {
+        'ok': bool(getattr(rsp, 'ok', False)),
+        'elapsed_seconds': float(getattr(rsp, 'elapsed_seconds', 0.0) or 0.0),
+        'error': getattr(rsp, 'error', None),
+        'semantic_context': getattr(rsp, 'semantic_context', {}) or {},
+        'python_code': getattr(rsp, 'python_code', '') or '',
+        'raw_text': getattr(rsp, 'raw_text', '') or '',
+    }
+
+
+def _exec_payload(exec_result) -> dict:
+    if exec_result is None:
+        return {'ok': False, 'elapsed_seconds': 0.0, 'error': 'not_executed'}
+    return {
+        'ok': bool(getattr(exec_result, 'ok', False)),
+        'elapsed_seconds': float(getattr(exec_result, 'elapsed_seconds', 0.0) or 0.0),
+        'error': getattr(exec_result, 'error', None),
+        'traceback': getattr(exec_result, 'traceback', None),
+    }
+
+
+def _decode_frame_b64(img_b64: str) -> Optional[np.ndarray]:
+    try:
+        arr = np.frombuffer(base64.b64decode(img_b64), dtype=np.uint8)
+        frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        return frame if frame is not None else None
+    except Exception:
+        return None
+
+
+def _resize_to_width(frame: np.ndarray, width: int) -> np.ndarray:
+    h, w = frame.shape[:2]
+    if w <= 0 or h <= 0:
+        return frame
+    new_h = max(1, int(round(h * float(width) / float(w))))
+    return cv2.resize(frame, (width, new_h), interpolation=cv2.INTER_AREA)
+
+
+def _put_label(frame: np.ndarray, label: str) -> np.ndarray:
+    out = frame.copy()
+    cv2.rectangle(out, (0, 0), (out.shape[1], 32), (20, 20, 20), thickness=-1)
+    cv2.putText(
+        out,
+        label,
+        (10, 22),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 255, 255),
+        1,
+        cv2.LINE_AA,
+    )
+    return out
+
+
+def _save_input_contact_sheet(frames_b64: List[str], out_dir: Path) -> Optional[Path]:
+    frames = []
+    for index, img_b64 in enumerate(frames_b64, start=1):
+        frame = _decode_frame_b64(img_b64)
+        if frame is None:
+            continue
+        frame = _resize_to_width(frame, 240)
+        frames.append(_put_label(frame, f'Input frame {index}'))
+    if not frames:
+        return None
+
+    max_h = max(frame.shape[0] for frame in frames)
+    padded = []
+    for frame in frames:
+        if frame.shape[0] < max_h:
+            pad = np.full((max_h - frame.shape[0], frame.shape[1], 3), 245, dtype=np.uint8)
+            frame = np.vstack([frame, pad])
+        padded.append(frame)
+    sheet = np.hstack(padded)
+    path = out_dir / 'input_contact_sheet.jpg'
+    cv2.imwrite(str(path), sheet, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return path
+
+
+def _save_demo_summary(artifact_dir: Path, screenshot_path: Optional[Path] = None) -> Optional[Path]:
+    contact_path = artifact_dir / 'input_contact_sheet.jpg'
+    screenshot_path = screenshot_path or (artifact_dir / 'robot_response.png')
+    if not contact_path.exists() or not Path(screenshot_path).exists():
+        return None
+
+    input_img = cv2.imread(str(contact_path), cv2.IMREAD_COLOR)
+    robot_img = cv2.imread(str(screenshot_path), cv2.IMREAD_COLOR)
+    if input_img is None or robot_img is None:
+        return None
+
+    target_w = max(640, input_img.shape[1])
+    input_img = _resize_to_width(input_img, target_w)
+    robot_img = _resize_to_width(robot_img, target_w)
+    input_img = _put_label(input_img, 'Human input frames sampled for VLM')
+    robot_img = _put_label(robot_img, 'Final Webots robot response')
+
+    spacer = np.full((24, target_w, 3), 255, dtype=np.uint8)
+    summary = np.vstack([input_img, spacer, robot_img])
+    path = artifact_dir / 'demo_summary.jpg'
+    cv2.imwrite(str(path), summary, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return path
+
+
+def _hold_simulation(
+    robot: Supervisor,
+    timestep: int,
+    vlm_api: NaoVlmAPI,
+    seconds: float,
+    reason: str,
+) -> None:
+    seconds = max(0.0, float(seconds))
+    if seconds <= 0.0:
+        return
+    print(f'[sim] holding for {seconds:.2f}s ({reason}); close Webots to end earlier.')
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if robot.step(timestep) == -1:
+            print('[sim] Webots closed during hold.')
+            return
+        vlm_api._sync_sensors()
+        vlm_api._record_metrics_step()
+
+
+def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None,
+                            out_dir: Optional[Path] = None,
+                            timeline: Optional[List[Dict[str, Any]]] = None) -> Path:
+    out_dir = out_dir or (config.ARTIFACTS_DIR / time.strftime('%Y%m%d_%H%M%S'))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for index, img_b64 in enumerate(frames_b64, start=1):
@@ -701,11 +850,14 @@ def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None) -> Pat
             (out_dir / f'frame_{index:02d}.jpg').write_bytes(base64.b64decode(img_b64))
         except Exception as e:
             _write_text(out_dir / f'frame_{index:02d}.error.txt', str(e))
+    _save_input_contact_sheet(frames_b64, out_dir)
 
     semantic_json = json.dumps(rsp.semantic_context or {}, ensure_ascii=False, indent=2)
     _write_text(out_dir / 'semantic_context.json', semantic_json)
     _write_text(out_dir / 'python_code.py', rsp.python_code or '')
     _write_text(out_dir / 'raw_response.txt', rsp.raw_text or '')
+    if timeline is not None:
+        _write_text(out_dir / 'timeline.json', json.dumps(timeline, ensure_ascii=False, indent=2) + '\n')
 
     summary = [
         f'ok={rsp.ok}',
@@ -731,6 +883,8 @@ def _run_oneshot_demo(
     buffer: Optional[FrameBuffer],
     client,
     executor: SandboxExecutor,
+    fallback: FallbackPolicy,
+    metrics_recorder: Optional[MetricsRecorder] = None,
 ) -> None:
     if buffer is None:
         print('[oneshot] ERROR: oneshot mode requires INPUT_MODE=webcam/video source.')
@@ -739,7 +893,16 @@ def _run_oneshot_demo(
         print('[oneshot] ERROR: VLM client unavailable; check SDK and llm_api_key.')
         return
 
-    print(f'[oneshot] waiting for at least {config.VLM_FRAME_COUNT} frames...')
+    t0 = time.time()
+    timeline: List[Dict[str, Any]] = []
+
+    def stage(name: str, detail: str = '') -> None:
+        elapsed = time.time() - t0
+        timeline.append({'elapsed_seconds': elapsed, 'stage': name, 'detail': detail})
+        suffix = f' - {detail}' if detail else ''
+        print(f'[oneshot +{elapsed:06.2f}s] {name}{suffix}')
+
+    stage('waiting_for_frames', f'target={config.VLM_FRAME_COUNT} source={config.WEBCAM_SOURCE!r}')
     ready = _wait_for_frame_buffer(
         robot=robot,
         vlm_api=vlm_api,
@@ -748,14 +911,14 @@ def _run_oneshot_demo(
         timeout_s=config.ONE_SHOT_BUFFER_TIMEOUT,
     )
     if not ready:
-        print('[oneshot] ERROR: frame buffer did not fill before timeout or simulation ended.')
+        stage('error', 'frame buffer did not fill before timeout or simulation ended')
         return
 
     if _is_video_file_source(config.WEBCAM_SOURCE):
         settle_s = config.ONE_SHOT_VIDEO_SETTLE_SECONDS
         if settle_s <= 0.0:
             settle_s = max(config.VLM_WINDOW_SECONDS, config.FRAME_BUFFER_SECONDS)
-        print(f'[oneshot] video source detected; allowing playback to progress for {settle_s:.2f}s before sampling...')
+        stage('video_playback_settle', f'{settle_s:.2f}s before sampling')
         if not _wait_for_video_progress(
             robot=robot,
             vlm_api=vlm_api,
@@ -763,26 +926,26 @@ def _run_oneshot_demo(
             timestep=timestep,
             settle_s=settle_s,
         ):
-            print('[oneshot] ERROR: simulation ended while waiting for video progress.')
+            stage('error', 'simulation ended while waiting for video progress')
             return
 
         direct_frames = _sample_frames_from_video_file(config.WEBCAM_SOURCE, config.VLM_FRAME_COUNT)
         if direct_frames:
             frames = direct_frames
-            print(f'[oneshot] sampled {len(frames)} frame(s) directly from source video {config.WEBCAM_SOURCE!r}')
+            stage('sampled_input_frames', f'{len(frames)} direct frames from source video')
         else:
             frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
-            print(f'[oneshot] fallback to buffer sampling: {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
+            stage('sampled_input_frames', f'{len(frames)} buffered frames from source video')
     else:
         frames = buffer.sample_recent(config.VLM_FRAME_COUNT)
 
     if not frames:
-        print('[oneshot] ERROR: failed to sample frames from buffer.')
+        stage('error', 'failed to sample frames')
         return
 
     if not _is_video_file_source(config.WEBCAM_SOURCE):
-        print(f'[oneshot] sampled {len(frames)} frame(s) from {config.WEBCAM_SOURCE!r}')
-    print('[oneshot] sending frames to VLM...')
+        stage('sampled_input_frames', f'{len(frames)} frames from {config.WEBCAM_SOURCE!r}')
+    stage('vlm_request_start', f'backend={config.VLM_BACKEND} model={getattr(client, "model", "")}')
     result_queue: queue.Queue = queue.Queue(maxsize=1)
 
     def _call_vlm() -> None:
@@ -806,21 +969,44 @@ def _run_oneshot_demo(
             print('[oneshot] simulation ended while waiting for VLM.')
             return
         vlm_api._sync_sensors()
+        vlm_api._record_metrics_step()
 
     if rsp is None:
-        print(f'[oneshot] ERROR: VLM call timed out after {config.ONE_SHOT_VLM_TIMEOUT:.1f}s')
+        stage('vlm_timeout', f'after {config.ONE_SHOT_VLM_TIMEOUT:.1f}s')
+        if metrics_recorder is not None:
+            metrics_recorder.write_result({
+                'status': 'vlm_timeout',
+                'input': {'mode': config.INPUT_MODE, 'source': str(config.WEBCAM_SOURCE)},
+                'frames_count': len(frames),
+                'vlm_response': {},
+                'exec_outcome': _exec_payload(None),
+                'fallback_stats': fallback.stats(),
+                'timeline': timeline,
+            })
         return
     if isinstance(rsp, Exception):
-        print(f'[oneshot] ERROR: unexpected VLM exception: {rsp}')
+        stage('vlm_exception', str(rsp))
+        if metrics_recorder is not None:
+            metrics_recorder.write_result({
+                'status': 'vlm_exception',
+                'input': {'mode': config.INPUT_MODE, 'source': str(config.WEBCAM_SOURCE)},
+                'frames_count': len(frames),
+                'vlm_response': {'error': str(rsp)},
+                'exec_outcome': _exec_payload(None),
+                'fallback_stats': fallback.stats(),
+                'timeline': timeline,
+            })
         return
 
+    exec_result = None
     if rsp.ok:
-        print(f'[oneshot] VLM done in {rsp.elapsed_seconds:.2f}s')
+        stage('vlm_response_received', f'{rsp.elapsed_seconds:.2f}s')
         print(f'[oneshot] semantic context: {rsp.semantic_context}')
         print(f'[oneshot] code:\n{rsp.python_code}\n')
+        stage('robot_execution_start')
         exec_result = executor.run(rsp.python_code)
         if (not exec_result.ok) and hasattr(client, 'repair'):
-            print(f'[oneshot] first execution failed, asking local VLM to repair: {exec_result.error}')
+            stage('robot_execution_failed_repairing', exec_result.error or '')
             repaired_rsp = client.repair(
                 frames,
                 rsp.semantic_context,
@@ -836,24 +1022,65 @@ def _run_oneshot_demo(
                     exec_result = repaired_exec_result
                 else:
                     print(f'[oneshot] repaired execution still failed: {repaired_exec_result.error}')
-        artifact_dir = _save_oneshot_artifacts(frames, rsp, exec_result)
+        artifact_dir = _save_oneshot_artifacts(
+            frames,
+            rsp,
+            exec_result,
+            out_dir=(metrics_recorder.run_dir if metrics_recorder is not None else None),
+            timeline=timeline,
+        )
         if exec_result.ok:
-            print(f'[oneshot] execution OK in {exec_result.elapsed_seconds:.2f}s')
+            stage('robot_execution_ok', f'{exec_result.elapsed_seconds:.2f}s')
+            fallback.record_success(rsp)
         else:
-            print(f'[oneshot] execution FAILED: {exec_result.error}')
+            stage('robot_execution_failed', exec_result.error or '')
             if exec_result.traceback:
                 print(exec_result.traceback)
-        print(f'[oneshot] artifacts saved to: {artifact_dir}')
+        stage('artifacts_saved', str(artifact_dir))
     else:
-        artifact_dir = _save_oneshot_artifacts(frames, rsp)
-        print(f'[oneshot] VLM FAILED: {rsp.error}')
-        print(f'[oneshot] artifacts saved to: {artifact_dir}')
+        artifact_dir = _save_oneshot_artifacts(
+            frames,
+            rsp,
+            out_dir=(metrics_recorder.run_dir if metrics_recorder is not None else None),
+            timeline=timeline,
+        )
+        stage('vlm_failed', rsp.error or '')
+        stage('artifacts_saved', str(artifact_dir))
+
+    if metrics_recorder is not None:
+        screenshot_path = metrics_recorder.export_screenshot(robot)
+        demo_summary_path = _save_demo_summary(artifact_dir, screenshot_path)
+        stage('robot_screenshot_saved', str(screenshot_path or ''))
+        _write_text(artifact_dir / 'timeline.json', json.dumps(timeline, ensure_ascii=False, indent=2) + '\n')
+        metrics_recorder.write_result({
+            'status': 'ok' if (rsp.ok and exec_result is not None and exec_result.ok) else 'failed',
+            'input': {'mode': config.INPUT_MODE, 'source': str(config.WEBCAM_SOURCE)},
+            'frames_count': len(frames),
+            'vlm_response': _response_payload(rsp),
+            'exec_outcome': _exec_payload(exec_result),
+            'fallback_stats': fallback.stats(),
+            'artifact_dir': str(artifact_dir),
+            'timeline': timeline,
+            'artifacts': {
+                'input_contact_sheet': str(artifact_dir / 'input_contact_sheet.jpg'),
+                'demo_summary': str(demo_summary_path or ''),
+                'timeline': str(artifact_dir / 'timeline.json'),
+            },
+        })
 
     if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
-        print('[oneshot] done; exiting controller.')
+        stage('done', 'controller will exit after optional post-execution hold')
+        if 'artifact_dir' in locals():
+            _write_text(artifact_dir / 'timeline.json', json.dumps(timeline, ensure_ascii=False, indent=2) + '\n')
 
 
-def _run_replay_demo(robot: Supervisor, timestep: int, vlm_api: NaoVlmAPI, executor: SandboxExecutor) -> None:
+def _run_replay_demo(
+    robot: Supervisor,
+    timestep: int,
+    vlm_api: NaoVlmAPI,
+    executor: SandboxExecutor,
+    metrics_recorder: Optional[MetricsRecorder] = None,
+) -> None:
     code_path = Path(config.REPLAY_CODE_PATH).expanduser()
     if not code_path.is_absolute():
         code_path = (Path(__file__).resolve().parent.parent.parent.parent / code_path).resolve()
@@ -874,6 +1101,7 @@ def _run_replay_demo(robot: Supervisor, timestep: int, vlm_api: NaoVlmAPI, execu
                 print('[replay] simulation ended during start delay.')
                 return
             vlm_api._sync_sensors()
+            vlm_api._record_metrics_step()
 
     print(f'[replay] executing precomputed code from: {code_path}')
     print(f'[replay] code:\n{code}\n')
@@ -884,6 +1112,32 @@ def _run_replay_demo(robot: Supervisor, timestep: int, vlm_api: NaoVlmAPI, execu
         print(f'[replay] execution FAILED: {result.error}')
         if result.traceback:
             print(result.traceback)
+    if metrics_recorder is not None:
+        metrics_recorder.export_screenshot(robot)
+        metrics_recorder.write_result({
+            'status': 'ok' if result.ok else 'failed',
+            'input': {'mode': 'replay', 'source': str(code_path)},
+            'frames_count': 0,
+            'vlm_response': {
+                'ok': True,
+                'semantic_context': {},
+                'python_code': code,
+                'raw_text': '',
+                'error': None,
+                'elapsed_seconds': 0.0,
+            },
+            'exec_outcome': _exec_payload(result),
+            'fallback_stats': {},
+            'artifact_dir': str(metrics_recorder.run_dir),
+        })
+
+
+def _request_simulation_quit(robot: Supervisor, status: int = 0) -> None:
+    try:
+        print(f'[sim] requesting Webots quit with status={status}')
+        robot.simulationQuit(status)
+    except Exception as exc:
+        print(f'[sim] WARNING: simulationQuit failed: {exc}')
 
 
 def main():
@@ -914,6 +1168,11 @@ def main():
         finger_motors=finger_motors,
     )
 
+    metrics_recorder = MetricsRecorder.from_env()
+    if metrics_recorder is not None:
+        vlm_api.set_metrics_recorder(metrics_recorder)
+        print(f'[init] metrics enabled: {metrics_recorder.run_dir}')
+
     # 4. FrameBuffer
     buffer: Optional[FrameBuffer] = None
     if config.INPUT_MODE == 'webcam':
@@ -935,7 +1194,14 @@ def main():
     worker: Optional[VLMWorker] = None
     if _VLM_IMPORT_OK and buffer is not None:
         try:
-            client = VLMClient(joint_limits=vlm_api.get_joint_limits())
+            if config.EVAL_METHOD == 'rule_baseline' or config.VLM_BACKEND == 'rule_baseline':
+                repo_root = str(config.REPO_ROOT)
+                if repo_root not in sys.path:
+                    sys.path.insert(0, repo_root)
+                from evaluation.rule_baseline import RuleBaselineClient
+                client = RuleBaselineClient(joint_limits=vlm_api.get_joint_limits())
+            else:
+                client = VLMClient(joint_limits=vlm_api.get_joint_limits())
             print(f'[init] VLMClient ready, model={client.model}')
         except Exception as e:
             print(f'[init] VLMClient disabled: {e}')
@@ -947,6 +1213,7 @@ def main():
     # 6. Sandbox executor
     executor = SandboxExecutor()
     executor.set_joint_limits(vlm_api.get_joint_limits())
+    executor.set_metrics_recorder(metrics_recorder)
 
     def move_head(yaw: float, pitch: float, duration: float = 0.2, trajectory: str = 'min_jerk') -> str:
         return vlm_api.move_joints(
@@ -980,10 +1247,19 @@ def main():
     if config.RUN_MODE == 'replay':
         print('[init] run mode: replay')
         try:
-            _run_replay_demo(robot, timestep, vlm_api, executor)
+            _run_replay_demo(robot, timestep, vlm_api, executor, metrics_recorder=metrics_recorder)
         finally:
+            _hold_simulation(
+                robot,
+                timestep,
+                vlm_api,
+                config.ONE_SHOT_POST_EXECUTION_SECONDS,
+                'replay complete',
+            )
             if buffer is not None:
                 buffer.stop()
+            if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
+                _request_simulation_quit(robot, 0)
         return
 
     if config.RUN_MODE == 'oneshot':
@@ -996,10 +1272,21 @@ def main():
                 buffer=buffer,
                 client=client,
                 executor=executor,
+                fallback=fallback,
+                metrics_recorder=metrics_recorder,
             )
         finally:
+            _hold_simulation(
+                robot,
+                timestep,
+                vlm_api,
+                config.ONE_SHOT_POST_EXECUTION_SECONDS,
+                'oneshot complete',
+            )
             if buffer is not None:
                 buffer.stop()
+            if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
+                _request_simulation_quit(robot, 0)
         return
 
     # 7. State-aware trigger + idle animator
@@ -1028,6 +1315,7 @@ def main():
     while robot.step(timestep) != -1:
         step_count += 1
         vlm_api._sync_sensors()
+        vlm_api._record_metrics_step()
 
         # Idle overlay ticks every main-loop step; primitives take over the
         # loop when they run, so idle naturally pauses during VLM execution.
