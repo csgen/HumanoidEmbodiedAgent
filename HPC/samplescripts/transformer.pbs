@@ -1,0 +1,169 @@
+#!/bin/bash
+# ===== PBS HEADER =====
+#PBS -N finsight_transformer
+#PBS -A finsight
+#PBS -l walltime=16:00:00
+#PBS -l select=1:ncpus=36:mpiprocs=1:ompthreads=36:mem=240gb:ngpus=1
+#PBS -j oe
+
+set -eox pipefail
+
+# ===== MODULE AND ENVIRONMENT =====
+TF_MODULE="TensorFlow/2.11.0-foss-2022a-CUDA-11.7.0"
+VENV="$HOME/.venvs/finsight-tf211-cuda117"
+
+# ===== PATHS =====
+export PROJECT_TAG="finsight"
+export WORK="$HOME/projects-sam/FinSight-QuantLab"
+export SRC="$WORK/src"
+export DATA="$WORK/data"
+export OUT_HOME="$WORK/results/deep/transformer_spread"
+export LOG_HOME="$WORK/results/logs"
+export SCRATCHFORJOB="/scratch/$USER/$PBS_JOBID"
+export OUT_SCRATCH="$SCRATCHFORJOB/results/deep/transformer_spread"
+export LOG_SCRATCH="$SCRATCHFORJOB/logs"
+
+# ===== CPU/GPU CONFIGURATION =====
+export OMP_NUM_THREADS=36
+export TF_NUM_INTRAOP_THREADS=36
+export TF_NUM_INTEROP_THREADS=4
+export TF_ENABLE_ONEDNN_OPTS=1
+export KMP_BLOCKTIME=0
+export KMP_AFFINITY="granularity=fine,compact,1,0"
+export TF_FORCE_GPU_ALLOW_GROWTH=true
+
+# ===== TRAINING CONFIGURATION =====
+# Transformer-specific hyperparameters
+export PAIRS_METHOD="${PAIRS_METHOD:-distance}"    # Pair selection method
+export EPOCHS="${EPOCHS:-20}"                      # Training epochs
+export BATCH_SIZE="${BATCH_SIZE:-64}"              # Batch size
+export LEARNING_RATE="${LR:-0.001}"                # Learning rate
+export NUM_BLOCKS="${NUM_BLOCKS:-2}"               # Number of Transformer blocks
+export NUM_HEADS="${NUM_HEADS:-4}"                 # Number of attention heads
+export D_MODEL="${D_MODEL:-64}"                    # Model dimension
+export RESUME="${RESUME:-}"                        # Resume flag
+
+# ===== SETUP =====
+mkdir -p "$SCRATCHFORJOB" "$OUT_SCRATCH" "$LOG_SCRATCH"
+mkdir -p "$OUT_HOME" "$LOG_HOME"
+cd "$SCRATCHFORJOB"
+
+# Live logging
+exec > >(stdbuf -oL tee -a "$SCRATCHFORJOB/pbs.live.$PBS_JOBID.out") 2>&1
+
+# Cleanup on exit
+cleanup() {
+  echo "[CLEANUP] Copying logs from scratch to home..."
+  rsync -av "$SCRATCHFORJOB"/pbs.live.$PBS_JOBID.out "$LOG_HOME/" 2>/dev/null || true
+  rsync -av "$SCRATCHFORJOB"/train.log "$LOG_HOME/" 2>/dev/null || true
+  echo "[CLEANUP] Logs copied to $LOG_HOME"
+}
+trap cleanup EXIT
+
+echo "========================================"
+echo "[ENV] Transformer Spread Prediction"
+echo "[ENV] Host: $(hostname)"
+echo "[ENV] Job: $PBS_JOBID"
+echo "[ENV] Work: $WORK"
+echo "[ENV] Scratch Output: $OUT_SCRATCH (fast local I/O)"
+echo "[ENV] Final Output: $OUT_HOME (will rsync at end)"
+echo "[ENV] Architecture: d_model=$D_MODEL, heads=$NUM_HEADS, blocks=$NUM_BLOCKS"
+echo "========================================"
+
+# ===== MODULES =====
+module purge
+module load "$TF_MODULE"
+echo "[MODULES] Loaded TensorFlow"
+module list
+
+# ===== VENV =====
+source "$VENV/bin/activate"
+echo "[VENV] Activated: $(which python)"
+python --version
+
+# ===== GPU CHECK =====
+echo "========================================"
+echo "[GPU] Running nvidia-smi..."
+command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi || echo "[GPU] nvidia-smi not found"
+
+echo "[GPU] Testing TensorFlow GPU..."
+python - <<'PY'
+import tensorflow as tf
+gpus = tf.config.list_physical_devices("GPU")
+print(f"[GPU] TensorFlow {tf.__version__}")
+print(f"[GPU] GPUs visible: {gpus}")
+if not gpus:
+    print("[GPU] WARNING: No GPUs!")
+PY
+echo "========================================"
+
+# ===== STAGE CODE =====
+echo "[STAGE] Copying source to scratch..."
+rsync -a "$SRC/" "$SCRATCHFORJOB/src/"
+rsync -a "$WORK/config.py" "$SCRATCHFORJOB/" 2>/dev/null || true
+echo "[STAGE] Complete"
+
+# ===== TRAINING =====
+echo "========================================"
+echo "[TRAIN] Starting Transformer training..."
+echo "[TRAIN] Pair selection: $PAIRS_METHOD"
+echo "[TRAIN] Epochs: $EPOCHS, Batch: $BATCH_SIZE, LR: $LEARNING_RATE"
+echo "[TRAIN] Architecture: d_model=$D_MODEL, heads=$NUM_HEADS, blocks=$NUM_BLOCKS"
+echo "[TRAIN] Resume: ${RESUME:-fresh}"
+echo "========================================"
+
+cd "$SCRATCHFORJOB"
+
+# Build command with architecture params - write to scratch
+TRAIN_CMD="python -u src/ml_train/train_transformer.py \
+  --pairs-method $PAIRS_METHOD \
+  --epochs $EPOCHS \
+  --batch-size $BATCH_SIZE \
+  --learning-rate $LEARNING_RATE \
+  --num-blocks $NUM_BLOCKS \
+  --num-heads $NUM_HEADS \
+  --d-model $D_MODEL \
+  --data-path $DATA/panel_live.parquet \
+  --out-dir $OUT_SCRATCH"
+
+# Add resume
+if [ -n "$RESUME" ]; then
+  if [ "$RESUME" = "auto" ]; then
+    TRAIN_CMD="$TRAIN_CMD --resume"
+  else
+    TRAIN_CMD="$TRAIN_CMD --resume $RESUME"
+  fi
+fi
+
+# Run
+echo "[TRAIN] Running: $TRAIN_CMD"
+$TRAIN_CMD 2>&1 | tee "$SCRATCHFORJOB/train.log"
+
+TRAIN_EXIT_CODE=${PIPESTATUS[0]}
+
+if [ $TRAIN_EXIT_CODE -eq 0 ]; then
+  echo "[SUCCESS] Training completed"
+else
+  echo "[ERROR] Training failed: $TRAIN_EXIT_CODE"
+  exit $TRAIN_EXIT_CODE
+fi
+
+# ===== STAGE RESULTS BACK TO HOME =====
+echo "========================================"
+echo "[STAGE] Copying results from scratch to home..."
+echo "[STAGE] From: $OUT_SCRATCH"
+echo "[STAGE] To: $OUT_HOME"
+
+rsync -av "$OUT_SCRATCH/" "$OUT_HOME/" 2>/dev/null || true
+echo "[STAGE] Results copied successfully"
+
+# ===== SUMMARY =====
+echo "========================================"
+echo "[DONE] Transformer training complete!"
+echo "[DONE] Results: $OUT_HOME"
+echo "[DONE] Logs: $LOG_HOME"
+echo "[DONE] Trained models:"
+ls -lh "$OUT_HOME"/*.keras 2>/dev/null || echo "  (no checkpoints found)"
+echo "[DONE] Training history:"
+ls -lh "$OUT_HOME"/*.csv 2>/dev/null || echo "  (no history found)"
+echo "========================================"
