@@ -7,7 +7,9 @@ import os
 import sys
 from pathlib import Path
 
-REPO_DIR = Path('/home/darian/桌面/humanoidRobot')
+import sys
+from pathlib import Path
+REPO_DIR = Path(__file__).resolve().parent.parent
 CTRL_DIR = REPO_DIR / 'nao_VLM' / 'controllers' / 'nao_vlm_test'
 sys.path.insert(0, str(CTRL_DIR))
 
@@ -17,9 +19,9 @@ from offline_local_vlm_debug import sample_video_frames, build_executor
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description='对输入视频运行 VLM，并导出低层控制代码。')
-    parser.add_argument('video', help='输入 mp4 路径')
-    parser.add_argument('--output-dir', required=True, help='输出目录')
+    parser = argparse.ArgumentParser(description='Run VLM on input video and export low-level control code. [对输入视频运行 VLM，并导出低层控制代码。]')
+    parser.add_argument('video', help='Input mp4 path [输入 mp4 路径]')
+    parser.add_argument('--output-dir', required=True, help='Output directory [输出目录]')
     parser.add_argument('--model', default=os.environ.get('LOCAL_VLM_MODEL', config.LOCAL_VLM_MODEL))
     parser.add_argument('--frames', type=int, default=int(os.environ.get('VLM_FRAME_COUNT', config.VLM_FRAME_COUNT)))
     args = parser.parse_args()
@@ -28,7 +30,7 @@ def main() -> int:
     if not video_path.is_absolute():
         video_path = (REPO_DIR / video_path).resolve()
     if not video_path.exists():
-        raise FileNotFoundError(f'视频不存在: {video_path}')
+        raise FileNotFoundError(f'Video does not exist: [视频不存在:] {video_path}')
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)

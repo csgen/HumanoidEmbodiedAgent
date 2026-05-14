@@ -1,5 +1,15 @@
 # 协作者使用指南
 
+## English Summary
+
+This guide is the day-to-day collaborator runbook. The current work is Phase 5:
+adding a reproducible evaluation framework around the existing Webots + NAO +
+VLM controller. The important entry points are `nao_VLM/controllers/nao_vlm_test/`
+for runtime control, `evaluation/` for benchmark/metrics/judge code, and
+`scripts/` for demos and recording. Paths are now repo-relative by default; set
+`REPO_DIR`, `WEBOTS_BIN`, or `PYTHON_BIN` only when your machine needs an
+override.
+
 ## 这项目做什么
 
 输入视频 → VLM → NAO 控制代码 → Webots 执行 → 左右分屏录屏。
@@ -10,7 +20,7 @@
 
 - 开发分支：`br_dev_setup_darian`
 - 主分支：`main`
-- 当前阶段：Phase 4 收尾，Phase 5 还没开始
+- 当前阶段：Phase 5 评测框架进行中
 
 ## 项目结构
 
@@ -19,6 +29,7 @@
 - `example_video/`：单个示例视频
 - `debug_video_samples/`：调试样例视频
 - `artifacts/screen_recordings_matched/`：最终对外展示的录屏成片
+- `evaluation/`：Phase 5 benchmark、metrics、rule baseline、VLM-as-Judge
 - `LOCAL_VLM_DEMO_STATUS.md`：当前阶段和近期进展
 - `Humanoid Embodied Agent — Proposal vs Current Implementation Analysis & Refined Plan.md`：总阶段规划
 
@@ -27,7 +38,7 @@
 1. 创建环境：`conda env create -f environment.yml`
 2. 激活环境：`conda activate humanoid_robot_vlm_darian`
 3. 确认 `.env`、`nao_VLM/controllers/nao_vlm_test/runtime.ini` 已指向正确 Python
-4. 确认 Webots 可执行文件在 `~/.local/opt/webots/webots`
+4. 确认 Webots 可执行文件可通过 `webots` 找到，或设置 `WEBOTS_BIN=/path/to/webots`
 
 ## 常用入口
 
@@ -36,6 +47,20 @@
 - 仅启动演示窗口：`bash scripts/launch_side_by_side_demo.sh <输入视频>`
 - 录摄像头样例：`python3 scripts/record_webcam.py`
 - 批量生成对照录屏：`bash scripts/batch_record_side_by_side_demos.sh`
+- 直播摄像头 demo：`WEBCAM_SOURCE=0 bash scripts/run_live_camera_demo.sh`
+- Phase 5 CaP 评测：`python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method cap`
+- Phase 5 baseline：`python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method rule_baseline`
+- Judge 报告：`python -m evaluation.judge artifacts/eval/*.json --output artifacts/eval/report.md`
+
+## 路径与环境变量
+
+脚本现在默认从自身位置推导项目根目录。只有在特殊环境中才需要手动设置：
+
+- `REPO_DIR=/path/to/HumanoidEmbodiedAgent`
+- `WEBOTS_BIN=/path/to/webots`
+- `PYTHON_BIN=/path/to/python`
+- `WEBCAM_SOURCE=0` 本机 Linux 摄像头
+- `WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed` SSH tunnel 后的远程摄像头
 
 ## 录屏产物
 

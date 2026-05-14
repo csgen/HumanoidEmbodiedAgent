@@ -7,10 +7,12 @@ dependencies:
   - opencv
   - flask>=2.3
   - python-dotenv>=1.0
+  - pillow
   - pinocchio
   - pip
   - pip:
       - openai>=1.0.0
+      - mss>=9.0.0
       - torch
       - torchvision
       - torchaudio
