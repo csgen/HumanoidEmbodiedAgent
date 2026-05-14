@@ -1,24 +1,36 @@
 """
-Local camera server — streams the laptop's webcam (or a video file) as MJPEG over HTTP.
+Local camera server — streams the host machine's webcam (or a video file) as
+MJPEG over HTTP, so a controller on another machine or VM can read it.
 
-Runs on the developer's Windows laptop. The cloud controller reads the stream
-via `cv2.VideoCapture("http://localhost:5000/video_feed")`, assuming an SSH
-reverse tunnel `ssh -R 5000:localhost:5000 user@cloud` is active.
+Two intended setups:
+  1. VirtualBox host -> guest: run on the host with --host 0.0.0.0; the guest
+     reads it at http://10.0.2.2:5000/video_feed  (10.0.2.2 is the host as seen
+     from a VirtualBox NAT guest).
+  2. Laptop -> cloud: run on the laptop (default --host 127.0.0.1) and reach it
+     from the cloud over an SSH reverse tunnel:
+     ssh -R 5000:localhost:5000 user@cloud
+
+The controller reads the stream via
+`cv2.VideoCapture("http://<host>:5000/video_feed")`.
 
 Usage:
-    # live webcam
+    # live webcam, localhost only (use with an SSH tunnel)
     python scripts/local_camera_server.py
 
-    # loop a prerecorded clip (useful for headless evaluation on cloud)
+    # live webcam, reachable by a VirtualBox guest on a trusted local network
+    python scripts/local_camera_server.py --source 0 --host 0.0.0.0
+
+    # loop a prerecorded clip
     python scripts/local_camera_server.py --source videos/scenario_01_wave.mp4 --loop
 
     # custom port
     python scripts/local_camera_server.py --port 5001
 
 Security note:
-    The server binds to 127.0.0.1 by default, so nothing is publicly reachable
-    unless you explicitly pass --host 0.0.0.0 (don't). Use SSH reverse tunnel
-    for cloud access.
+    The server binds to 127.0.0.1 by default (not reachable off-machine).
+    --host 0.0.0.0 exposes it on all interfaces — fine on a trusted local
+    network (e.g. a VirtualBox host/guest pair), but don't use it on an
+    untrusted network; prefer an SSH reverse tunnel there.
 """
 import argparse
 import sys
@@ -115,7 +127,8 @@ def main():
                     help='Device index (e.g. 0) or path to a video file. Default: 0')
     ap.add_argument('--port', type=int, default=5000, help='Listening port (default 5000)')
     ap.add_argument('--host', default='127.0.0.1',
-                    help='Bind address (default 127.0.0.1; do NOT use 0.0.0.0 unless you know why)')
+                    help='Bind address. Default 127.0.0.1 (localhost only). Use 0.0.0.0 to let '
+                         'a VirtualBox guest or other host on a trusted LAN reach the stream.')
     ap.add_argument('--loop', action='store_true',
                     help='Loop the video file when it ends (ignored for webcam)')
     ap.add_argument('--fps', type=int, default=30, help='Target frame rate for the stream')
@@ -139,8 +152,11 @@ def main():
     print(f"[local_camera_server] serving MJPEG at http://{args.host}:{args.port}/video_feed")
     print(f"[local_camera_server] preview in browser: http://{args.host}:{args.port}/")
     if args.host != '127.0.0.1':
-        print(f"[local_camera_server] WARNING: host is {args.host}, not loopback. "
-              f"Prefer SSH reverse tunnel for cloud access.")
+        print(f"[local_camera_server] NOTE: host is {args.host}, not loopback — the "
+              f"stream is reachable off-machine. Fine on a trusted LAN (e.g. a "
+              f"VirtualBox host/guest pair, where the guest reads "
+              f"http://10.0.2.2:{args.port}/video_feed). On an untrusted network, "
+              f"prefer an SSH reverse tunnel instead.")
 
     # threaded=True lets the generator keep streaming while the view handler returns
     app.run(host=args.host, port=args.port, threaded=True, debug=False)
