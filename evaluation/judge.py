@@ -7,6 +7,16 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
+# Load the repo-root .env so llm_api_key / OPENAI_API_KEY / base_url are
+# available. judge.py runs from the shell (not inside the Webots controller,
+# which is the only component that previously loaded .env), so without this
+# the judge silently "skips" whenever the key is only in .env.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+except ImportError:
+    pass
+
 
 try:
     from openai import OpenAI

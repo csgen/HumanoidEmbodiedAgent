@@ -17,6 +17,15 @@ from typing import Any, Dict, List
 from .metrics import compute_result_metrics
 from .scenarios import REPO_ROOT, ScenarioSpec, get_scenarios
 
+# Load the repo-root .env so llm_api_key / base_url / VLM_* are visible here
+# and propagate into the env passed to the Webots subprocess. Mirrors what the
+# controller does; without it these only work if exported in the shell.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(REPO_ROOT / '.env')
+except ImportError:
+    pass
+
 
 WORLD_FILE = REPO_ROOT / 'nao_VLM' / 'worlds' / 'nao_VLM.wbt'
 
