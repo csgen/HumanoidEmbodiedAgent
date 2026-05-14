@@ -87,13 +87,59 @@ WEBCAM_SOURCE=0
 ```
 The controller continuously samples the webcam and responds in a loop.
 > **VirtualBox note:** a VirtualBox Ubuntu guest does **not** see the host's
-> webcam by default — `/dev/video0` will not exist. On a VM, use example-video
-> mode, enable VirtualBox USB webcam passthrough, or stream a camera in over
-> SSH with `scripts/local_camera_server.py` (see `AGENTS.md`). A native
-> (bare-metal) Ubuntu install has the webcam directly.
+> webcam by default — `/dev/video0` will not exist. A native (bare-metal)
+> Ubuntu install has the webcam directly. On a VM you have three options:
+> 1. **Example-video mode** — skip the webcam entirely (recommended for a VM).
+> 2. **USB passthrough** — VirtualBox *Devices → Webcams → \<your camera\>*
+>    forwards the host webcam into the guest; then keep `WEBCAM_SOURCE=0`.
+> 3. **(Recommended) Stream from the Windows host** — see the step-by-step below.
+
+#### Streaming the host webcam into a VirtualBox guest
+
+The host runs a small MJPEG server (`scripts/local_camera_server.py`); the
+guest reads it over HTTP. `10.0.2.2` is the address of the host as seen from a
+VirtualBox NAT guest.
+
+**On the Windows host:**
+
+1. Install the server dependencies (host Python, not the guest's venv):
+   ```
+   pip install flask opencv-python
+   ```
+2. Start the server, bound to all interfaces so the guest can reach it:
+   ```
+   python scripts/local_camera_server.py --source 0 --host 0.0.0.0 --port 5000
+   ```
+3. On first run, Windows Firewall will prompt — click **Allow** (Python, on
+   private networks).
+4. Sanity-check on the host: open `http://localhost:5000/` in a browser. You
+   should see the live webcam.
+
+**In the VirtualBox Ubuntu guest:**
+
+5. Confirm the guest can reach the server (`curl` is usually not installed —
+   Python works and you already have it in `.venv`):
+   ```
+   python -c "import urllib.request; print(urllib.request.urlopen('http://10.0.2.2:5000/health', timeout=3).read())"
+   ```
+   Expect `b'{"status": "ok", ...}'`. If it hangs or refuses the connection,
+   the server isn't running or the host firewall is still blocking it.
+6. Point `.env` at the stream:
+   ```
+   INPUT_MODE=webcam
+   RUN_MODE=periodic
+   WEBCAM_SOURCE=http://10.0.2.2:5000/video_feed
+   ```
+7. Launch Webots and run the controller as in step 4 below.
+
+> If `10.0.2.2` is unreachable: re-check the host firewall (allow inbound TCP
+> 5000 for Python on private networks), or switch the VM network adapter to
+> Host-Only / Bridged and use the host's adapter IP (e.g. `192.168.56.1`)
+> instead of `10.0.2.2`.
 
 ### 4. Launch Webots and run
 ```bash
+cd nao_VLM
 webots nao_VLM/worlds/nao_VLM.wbt
 ```
 Press Reset (⏪) then Play (▶️). The `nao_vlm_test` controller starts
