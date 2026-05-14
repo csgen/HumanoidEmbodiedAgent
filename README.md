@@ -87,10 +87,16 @@ WEBCAM_SOURCE=0
 ```
 The controller continuously samples the webcam and responds in a loop.
 > **VirtualBox note:** a VirtualBox Ubuntu guest does **not** see the host's
-> webcam by default — `/dev/video0` will not exist. On a VM, use example-video
-> mode, enable VirtualBox USB webcam passthrough, or stream a camera in over
-> SSH with `scripts/local_camera_server.py` (see `AGENTS.md`). A native
-> (bare-metal) Ubuntu install has the webcam directly.
+> webcam by default — `/dev/video0` will not exist. A native (bare-metal)
+> Ubuntu install has the webcam directly. On a VM you have three options:
+> 1. **Example-video mode** — skip the webcam entirely (recommended for a VM).
+> 2. **USB passthrough** — VirtualBox *Devices → Webcams → \<your camera\>*
+>    forwards the host webcam into the guest; then keep `WEBCAM_SOURCE=0`.
+> 3. **Stream from the Windows host** — on the host run
+>    `python scripts/local_camera_server.py --source 0 --host 0.0.0.0`, then in
+>    the guest set `WEBCAM_SOURCE=http://10.0.2.2:5000/video_feed`
+>    (`10.0.2.2` is the host as seen from a VirtualBox NAT guest). Allow Python
+>    through the host firewall on first run.
 
 ### 4. Launch Webots and run
 ```bash
