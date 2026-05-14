@@ -45,8 +45,11 @@ def find_webots() -> str:
     raise FileNotFoundError('Webots executable not found. Set WEBOTS_BIN=/path/to/webots.')
 
 
-def build_webots_command(webots_bin: str, *, headless: bool) -> List[str]:
-    cmd = [webots_bin, '--batch', '--mode=fast', '--stdout', '--stderr', str(WORLD_FILE)]
+def build_webots_command(webots_bin: str, *, headless: bool, realtime: bool = False) -> List[str]:
+    # --mode=fast runs the sim as fast as the CPU allows (default, quick batch
+    # runs); --mode=realtime throttles to 1x wall-clock so a run can be watched.
+    mode = '--mode=realtime' if realtime else '--mode=fast'
+    cmd = [webots_bin, '--batch', mode, '--stdout', '--stderr', str(WORLD_FILE)]
     if headless and shutil.which('xvfb-run'):
         return ['xvfb-run', '-a', *cmd]
     return cmd
@@ -60,6 +63,7 @@ def run_one(
     run_group: str,
     headless: bool,
     timeout_s: float,
+    realtime: bool = False,
 ) -> Dict[str, Any]:
     webots_bin = find_webots()
     run_id = f'{run_group}__{method}__{spec.id}__r{round_index:02d}'
@@ -88,7 +92,7 @@ def run_one(
     if method == 'cap' and env.get('VLM_BACKEND', '').strip().lower() in {'', 'auto'}:
         env['VLM_BACKEND'] = 'openai'
 
-    cmd = build_webots_command(webots_bin, headless=headless)
+    cmd = build_webots_command(webots_bin, headless=headless, realtime=realtime)
     started = time.time()
     timed_out = False
     timeout_error = ''
@@ -193,6 +197,9 @@ def main(argv: List[str] | None = None) -> int:
                         help='After the benchmark, run the VLM-as-Judge on the aggregate '
                              'this run produced (uses the exact file path, no shell glob).')
     parser.add_argument('--headless', action='store_true')
+    parser.add_argument('--realtime', action='store_true',
+                        help='Run Webots at real-time speed (--mode=realtime) so you can '
+                             'watch the run; default is --mode=fast for quick batch runs.')
     parser.add_argument('--timeout-s', type=float, default=180.0)
     parser.add_argument('--output-dir', type=Path, default=REPO_ROOT / 'artifacts' / 'eval')
     args = parser.parse_args(argv)
@@ -201,6 +208,10 @@ def main(argv: List[str] | None = None) -> int:
     if not scenarios:
         print(f'No existing videos found for scenario set {args.scenario_set!r}.', file=sys.stderr)
         return 1
+
+    if args.realtime:
+        print('[benchmark] --realtime: Webots runs at 1x wall-clock '
+              '(slower; for visual inspection).')
 
     methods = ['rule_baseline', 'cap'] if args.method == 'both' else [args.method]
     run_group = time.strftime(f'{args.method}_%Y%m%d_%H%M%S')
@@ -218,6 +229,7 @@ def main(argv: List[str] | None = None) -> int:
                             run_group=run_group,
                             headless=args.headless,
                             timeout_s=args.timeout_s,
+                            realtime=args.realtime,
                         )
                     )
                 except subprocess.TimeoutExpired as exc:
