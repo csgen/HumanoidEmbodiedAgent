@@ -762,19 +762,21 @@ def _resize_to_width(frame: np.ndarray, width: int) -> np.ndarray:
 
 
 def _put_label(frame: np.ndarray, label: str) -> np.ndarray:
-    out = frame.copy()
-    cv2.rectangle(out, (0, 0), (out.shape[1], 32), (20, 20, 20), thickness=-1)
+    # Prepend a separate label band ABOVE the frame rather than painting over
+    # its top pixels, so no image content (e.g. the robot's head) is hidden.
+    band_h = 30
+    band = np.full((band_h, frame.shape[1], 3), (20, 20, 20), dtype=np.uint8)
     cv2.putText(
-        out,
+        band,
         label,
-        (10, 22),
+        (10, 21),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.58,
         (255, 255, 255),
         1,
         cv2.LINE_AA,
     )
-    return out
+    return np.vstack([band, frame])
 
 
 def _save_input_contact_sheet(frames_b64: List[str], out_dir: Path) -> Optional[Path]:
