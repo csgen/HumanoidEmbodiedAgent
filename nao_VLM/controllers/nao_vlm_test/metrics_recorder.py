@@ -53,6 +53,11 @@ class MetricsRecorder:
         self.screenshot_path = self.run_dir / 'robot_response.png'
         self._step_records = 0
         self._sandbox_records = 0
+        # Robot motion capture: a throttled sequence of screenshots taken
+        # during the VLM-code execution window (armed via begin/end).
+        self._motion_capture_armed = False
+        self._motion_frame_paths: list = []
+        self._last_motion_capture_sim_time: Optional[float] = None
 
     @classmethod
     def from_env(cls) -> Optional['MetricsRecorder']:
@@ -125,6 +130,52 @@ class MetricsRecorder:
             (self.run_dir / 'robot_response.error.txt').write_text(str(exc), encoding='utf-8')
             return None
         return self.screenshot_path
+
+    # ------------------------------------------------------------------ motion capture
+    # A throttled sequence of robot screenshots taken while the VLM-generated
+    # code executes, so a continuous motion is reviewable / judgeable as a
+    # sequence rather than a single (possibly unrepresentative) frame.
+
+    def begin_motion_capture(self) -> None:
+        """Arm motion capture. Call right before executing VLM code."""
+        self._motion_capture_armed = True
+        self._motion_frame_paths = []
+        self._last_motion_capture_sim_time = None
+
+    def end_motion_capture(self) -> list:
+        """Disarm motion capture and return the captured frame paths (as str)."""
+        self._motion_capture_armed = False
+        return list(self._motion_frame_paths)
+
+    @property
+    def motion_frame_paths(self) -> list:
+        return list(self._motion_frame_paths)
+
+    def maybe_capture_motion_frame(self, robot, sim_time: float) -> Optional[Path]:
+        """
+        Throttled per-step screenshot. No-op unless armed. Captures at most
+        one frame per MOTION_FRAME_INTERVAL_S of sim time, up to
+        MOTION_FRAME_MAX frames total. Safe to call every simulation step.
+        """
+        if not self._motion_capture_armed:
+            return None
+        if len(self._motion_frame_paths) >= config.MOTION_FRAME_MAX:
+            return None
+        last = self._last_motion_capture_sim_time
+        if last is not None and (float(sim_time) - last) < config.MOTION_FRAME_INTERVAL_S:
+            return None
+
+        index = len(self._motion_frame_paths) + 1
+        frame_path = self.run_dir / f'robot_frame_{index:02d}.jpg'
+        try:
+            robot.exportImage(str(frame_path), 90)
+        except Exception as exc:
+            (self.run_dir / f'robot_frame_{index:02d}.error.txt').write_text(
+                str(exc), encoding='utf-8')
+            return None
+        self._motion_frame_paths.append(str(frame_path))
+        self._last_motion_capture_sim_time = float(sim_time)
+        return frame_path
 
     def write_result(self, payload: Dict[str, Any]) -> Path:
         payload = dict(payload or {})

@@ -62,6 +62,14 @@ ONE_SHOT_POST_EXECUTION_SECONDS = float(os.getenv('ONE_SHOT_POST_EXECUTION_SECON
 ONE_SHOT_VIDEO_SETTLE_SECONDS = float(os.getenv('ONE_SHOT_VIDEO_SETTLE_SECONDS', '0.0'))
 ONE_SHOT_VIDEO_CAPTURE_MODE = os.getenv('ONE_SHOT_VIDEO_CAPTURE_MODE', 'recent').strip().lower()
 
+# Robot motion capture: during the VLM-code execution window the metrics
+# recorder grabs a throttled sequence of robot screenshots so the motion can
+# be reviewed (and judged) as a sequence instead of one possibly
+# unrepresentative frame. MOTION_FRAME_INTERVAL_S is sim-time spacing between
+# captures; MOTION_FRAME_MAX caps how many are kept on long motions.
+MOTION_FRAME_INTERVAL_S = float(os.getenv('MOTION_FRAME_INTERVAL_S', '0.4'))
+MOTION_FRAME_MAX = int(os.getenv('MOTION_FRAME_MAX', '8'))
+
 # Phase-5 evaluation metadata. When METRICS_RUN_ID is empty, all metrics hooks
 # stay disabled and the controller behaves like the demo pipeline.
 METRICS_RUN_ID = os.getenv('METRICS_RUN_ID', '').strip()

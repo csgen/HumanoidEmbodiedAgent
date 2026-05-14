@@ -164,9 +164,10 @@ class NaoVlmAPI:
     def _record_metrics_step(self) -> None:
         if self.metrics_recorder is None:
             return
+        sim_time = self.robot.getTime()
         try:
             self.metrics_recorder.record_step(
-                sim_time=self.robot.getTime(),
+                sim_time=sim_time,
                 q_current=self.q_current,
                 sensors=self.sensors,
                 model=self.model,
@@ -174,6 +175,11 @@ class NaoVlmAPI:
             )
         except Exception as exc:
             print(f'[metrics] joint-state logging failed: {exc}')
+        # Throttled robot-motion screenshot (no-op unless capture is armed).
+        try:
+            self.metrics_recorder.maybe_capture_motion_frame(self.robot, sim_time)
+        except Exception as exc:
+            print(f'[metrics] motion-frame capture failed: {exc}')
 
     def _step(self) -> bool:
         """Advance simulation by one timestep, sync sensors. Returns False if sim ended."""
@@ -795,14 +801,50 @@ def _save_input_contact_sheet(frames_b64: List[str], out_dir: Path) -> Optional[
     return path
 
 
+def _save_robot_motion_contact_sheet(frame_paths: List[str], out_dir: Path) -> Optional[Path]:
+    """Horizontal labeled strip of the throttled robot-motion screenshots.
+
+    Mirrors `_save_input_contact_sheet`, but reads frames from disk (the
+    metrics recorder writes them as numbered JPEGs) instead of base64.
+    """
+    frames = []
+    for index, fp in enumerate(frame_paths, start=1):
+        img = cv2.imread(str(fp), cv2.IMREAD_COLOR)
+        if img is None:
+            continue
+        img = _resize_to_width(img, 240)
+        frames.append(_put_label(img, f'Robot motion {index}'))
+    if not frames:
+        return None
+
+    max_h = max(frame.shape[0] for frame in frames)
+    padded = []
+    for frame in frames:
+        if frame.shape[0] < max_h:
+            pad = np.full((max_h - frame.shape[0], frame.shape[1], 3), 245, dtype=np.uint8)
+            frame = np.vstack([frame, pad])
+        padded.append(frame)
+    sheet = np.hstack(padded)
+    path = out_dir / 'robot_motion_contact_sheet.jpg'
+    cv2.imwrite(str(path), sheet, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return path
+
+
 def _save_demo_summary(artifact_dir: Path, screenshot_path: Optional[Path] = None) -> Optional[Path]:
     contact_path = artifact_dir / 'input_contact_sheet.jpg'
-    screenshot_path = screenshot_path or (artifact_dir / 'robot_response.png')
-    if not contact_path.exists() or not Path(screenshot_path).exists():
+    # Prefer the multi-frame motion sheet; fall back to the single screenshot.
+    motion_sheet_path = artifact_dir / 'robot_motion_contact_sheet.jpg'
+    if motion_sheet_path.exists():
+        robot_path: Path = motion_sheet_path
+        robot_label = 'Webots robot motion sequence'
+    else:
+        robot_path = Path(screenshot_path or (artifact_dir / 'robot_response.png'))
+        robot_label = 'Final Webots robot response'
+    if not contact_path.exists() or not robot_path.exists():
         return None
 
     input_img = cv2.imread(str(contact_path), cv2.IMREAD_COLOR)
-    robot_img = cv2.imread(str(screenshot_path), cv2.IMREAD_COLOR)
+    robot_img = cv2.imread(str(robot_path), cv2.IMREAD_COLOR)
     if input_img is None or robot_img is None:
         return None
 
@@ -810,7 +852,7 @@ def _save_demo_summary(artifact_dir: Path, screenshot_path: Optional[Path] = Non
     input_img = _resize_to_width(input_img, target_w)
     robot_img = _resize_to_width(robot_img, target_w)
     input_img = _put_label(input_img, 'Human input frames sampled for VLM')
-    robot_img = _put_label(robot_img, 'Final Webots robot response')
+    robot_img = _put_label(robot_img, robot_label)
 
     spacer = np.full((24, target_w, 3), 255, dtype=np.uint8)
     summary = np.vstack([input_img, spacer, robot_img])
@@ -999,11 +1041,16 @@ def _run_oneshot_demo(
         return
 
     exec_result = None
+    motion_frames: List[str] = []
+    motion_sheet_path: Optional[Path] = None
     if rsp.ok:
         stage('vlm_response_received', f'{rsp.elapsed_seconds:.2f}s')
         print(f'[oneshot] semantic context: {rsp.semantic_context}')
         print(f'[oneshot] code:\n{rsp.python_code}\n')
         stage('robot_execution_start')
+        # Arm throttled robot-motion screenshots for the execution window.
+        if metrics_recorder is not None:
+            metrics_recorder.begin_motion_capture()
         exec_result = executor.run(rsp.python_code)
         if (not exec_result.ok) and hasattr(client, 'repair'):
             stage('robot_execution_failed_repairing', exec_result.error or '')
@@ -1022,6 +1069,12 @@ def _run_oneshot_demo(
                     exec_result = repaired_exec_result
                 else:
                     print(f'[oneshot] repaired execution still failed: {repaired_exec_result.error}')
+        # Disarm capture and build the labeled motion contact sheet.
+        if metrics_recorder is not None:
+            motion_frames = metrics_recorder.end_motion_capture()
+            motion_sheet_path = _save_robot_motion_contact_sheet(
+                motion_frames, metrics_recorder.run_dir)
+            stage('robot_motion_frames_captured', f'{len(motion_frames)} frames')
         artifact_dir = _save_oneshot_artifacts(
             frames,
             rsp,
@@ -1065,6 +1118,8 @@ def _run_oneshot_demo(
                 'input_contact_sheet': str(artifact_dir / 'input_contact_sheet.jpg'),
                 'demo_summary': str(demo_summary_path or ''),
                 'timeline': str(artifact_dir / 'timeline.json'),
+                'robot_motion_frames': motion_frames,
+                'robot_motion_contact_sheet': str(motion_sheet_path or ''),
             },
         })
 

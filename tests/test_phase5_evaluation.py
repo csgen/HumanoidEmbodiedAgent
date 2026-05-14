@@ -13,11 +13,24 @@ CTRL_DIR = REPO_ROOT / 'nao_VLM' / 'controllers' / 'nao_vlm_test'
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(CTRL_DIR))
 
+import config as ctrl_config
 from evaluation.metrics import compute_com_excursion, compute_jerk, compute_result_metrics, load_jsonl
 from evaluation.rule_baseline import code_for_intent, infer_label_from_scenario_id
 from evaluation.scenarios import get_scenarios
 from metrics_recorder import MetricsRecorder
 from sandbox_exec import SandboxExecutor
+
+
+class _FakeRobot:
+    """Minimal stand-in for the Webots Supervisor — just enough for
+    MetricsRecorder.maybe_capture_motion_frame()."""
+
+    def __init__(self) -> None:
+        self.export_calls = 0
+
+    def exportImage(self, path, quality):  # noqa: N802 (Webots API name)
+        self.export_calls += 1
+        Path(path).write_bytes(b'\xff\xd8\xff\xd9')  # minimal JPEG-ish bytes
 
 
 class Phase5EvaluationTests(unittest.TestCase):
@@ -86,6 +99,39 @@ class Phase5EvaluationTests(unittest.TestCase):
             metrics = compute_result_metrics(result)
             self.assertEqual(metrics['execution_success'], 1.0)
             self.assertEqual(metrics['safety_adherence'], 1.0)
+
+    def test_motion_frame_capture_throttling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            recorder = MetricsRecorder('unit_motion', Path(tmp))
+            robot = _FakeRobot()
+            interval = ctrl_config.MOTION_FRAME_INTERVAL_S
+            cap = ctrl_config.MOTION_FRAME_MAX
+
+            # Not armed -> no-op.
+            self.assertIsNone(recorder.maybe_capture_motion_frame(robot, 0.0))
+            self.assertEqual(robot.export_calls, 0)
+
+            recorder.begin_motion_capture()
+            # First capture always succeeds.
+            self.assertIsNotNone(recorder.maybe_capture_motion_frame(robot, 0.0))
+            # Too soon -> throttled.
+            self.assertIsNone(recorder.maybe_capture_motion_frame(robot, interval * 0.5))
+            # Enough sim time elapsed -> captures again.
+            self.assertIsNotNone(recorder.maybe_capture_motion_frame(robot, interval * 1.1))
+
+            # Spam well past the cap; should stop at MOTION_FRAME_MAX.
+            t = interval * 2.0
+            for _ in range(cap + 5):
+                recorder.maybe_capture_motion_frame(robot, t)
+                t += interval * 1.1
+
+            frames = recorder.end_motion_capture()
+            self.assertEqual(len(frames), cap)
+            for fp in frames:
+                self.assertTrue(Path(fp).exists())
+
+            # Disarmed -> no-op again.
+            self.assertIsNone(recorder.maybe_capture_motion_frame(robot, t + 100.0))
 
     def test_missing_artifact_paths_are_empty_logs(self):
         self.assertEqual(load_jsonl(''), [])

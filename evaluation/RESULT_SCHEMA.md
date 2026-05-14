@@ -139,7 +139,7 @@ A list of stage events appended during the oneshot run. Each entry:
 | Key | Type | Meaning |
 |---|---|---|
 | `elapsed_seconds` | `float` | Seconds since the run started. |
-| `stage` | `str` | Stage name, e.g. `waiting_for_frames`, `vlm_request_start`, `vlm_response_received`, `robot_execution_start`, `robot_execution_ok`, `robot_execution_failed`, `artifacts_saved`, `done`. |
+| `stage` | `str` | Stage name, e.g. `waiting_for_frames`, `vlm_request_start`, `vlm_response_received`, `robot_execution_start`, `robot_motion_frames_captured`, `robot_execution_ok`, `robot_execution_failed`, `artifacts_saved`, `done`. |
 | `detail` | `str` | Free-text detail for the stage. |
 
 ---
@@ -147,18 +147,20 @@ A list of stage events appended during the oneshot run. Each entry:
 ## 8. `artifacts` (nested)
 
 Absolute file paths. `MetricsRecorder.write_result()` always fills the first
-five; the oneshot success/fail path also adds the last three.
+five; the oneshot success/fail path also adds the rest.
 
 | Key | Type | Always present? | Meaning |
 |---|---|---|---|
 | `run_dir` | `str` | yes | The run's artifact directory. |
 | `joint_states` | `str` | yes | Path to `joint_states.jsonl` — see §10. |
 | `sandbox_events` | `str` | yes | Path to `sandbox_events.jsonl` — see §10. |
-| `robot_screenshot` | `str` | yes | Path to `robot_response.png`. Empty string if the screenshot export failed. |
+| `robot_screenshot` | `str` | yes | Path to `robot_response.png` (final-frame screenshot). Empty string if the screenshot export failed. |
 | `result_json` | `str` | yes | Path to this `result.json` itself. |
 | `input_contact_sheet` | `str` | oneshot main path only | Path to `input_contact_sheet.jpg`. |
 | `demo_summary` | `str` | oneshot main path only | Path to `demo_summary.jpg`. Empty string if not generated. |
 | `timeline` | `str` | oneshot main path only | Path to `timeline.json`. |
+| `robot_motion_frames` | `list[str]` | oneshot main path only | Ordered paths of the throttled robot-motion screenshots (`robot_frame_01.jpg` …) captured during the VLM-code execution window. Empty list if none captured (e.g. VLM failed before execution). |
+| `robot_motion_contact_sheet` | `str` | oneshot main path only | Path to `robot_motion_contact_sheet.jpg` — a labeled left-to-right strip of the `robot_motion_frames`. Empty string if no frames captured. This is what `judge.py` feeds to the VLM-as-Judge (falling back to `robot_screenshot` if absent). |
 
 ---
 
@@ -219,20 +221,27 @@ A single run produces `artifacts/oneshot/<run_id>/` containing:
 
 ```
 artifacts/oneshot/<run_id>/
-├── result.json                # this file (§2/§3)
-├── joint_states.jsonl         # §10
-├── sandbox_events.jsonl       # §10
-├── robot_response.png         # final robot screenshot (or robot_response.error.txt)
-├── frame_01.jpg ... frame_NN.jpg   # sampled VLM input frames (or frame_NN.error.txt)
-├── input_contact_sheet.jpg    # horizontal strip of the input frames
-├── demo_summary.jpg           # input strip + robot screenshot side-by-side (oneshot main path)
-├── semantic_context.json      # the VLM semantic_context block, pretty-printed
-├── python_code.py             # the VLM-generated motion code
-├── raw_response.txt           # full raw VLM completion
-├── timeline.json              # the timeline list (§7)
-├── summary.txt                # one-line-per-field human summary
-└── execution_traceback.txt    # only if sandbox execution raised
+├── result.json                       # this file (§2/§3)
+├── joint_states.jsonl                # §10
+├── sandbox_events.jsonl              # §10
+├── robot_response.png                # final robot screenshot (or robot_response.error.txt)
+├── robot_frame_01.jpg ... robot_frame_NN.jpg   # throttled robot-motion screenshots (§8 robot_motion_frames)
+├── robot_motion_contact_sheet.jpg    # labeled left-to-right strip of the robot-motion frames (§8)
+├── frame_01.jpg ... frame_NN.jpg     # sampled VLM input frames (or frame_NN.error.txt)
+├── input_contact_sheet.jpg           # horizontal strip of the input frames
+├── demo_summary.jpg                  # input strip + robot motion sheet (or screenshot) side-by-side
+├── semantic_context.json             # the VLM semantic_context block, pretty-printed
+├── python_code.py                    # the VLM-generated motion code
+├── raw_response.txt                  # full raw VLM completion
+├── timeline.json                     # the timeline list (§7)
+├── summary.txt                       # one-line-per-field human summary
+└── execution_traceback.txt           # only if sandbox execution raised
 ```
+
+Robot-motion capture cadence is controlled by `MOTION_FRAME_INTERVAL_S`
+(sim-time spacing, default 0.4 s) and `MOTION_FRAME_MAX` (cap, default 8) in
+`config.py`. A very short motion may yield only 1-2 frames; `robot_response.png`
+always exists as the final-frame fallback.
 
 > When launched by `run_benchmark.py`, the run directory is
 > `artifacts/oneshot/<run_id>/` with
@@ -264,7 +273,7 @@ If you change a key, check these consumers:
 |---|---|
 | `evaluation/run_benchmark.py` | Loads the whole Stage-1 file, then augments it (adds all Stage-2 keys). |
 | `evaluation/metrics.py` (`compute_result_metrics`) | `artifacts.joint_states`, `artifacts.sandbox_events`, `exec_outcome.ok`, `vlm_response.python_code`, `fallback_stats.tier_a_fires` / `tier_b_fires` / `tier_c_fires`. |
-| `evaluation/judge.py` (`judge_one`, `_find_images`, `_cache_key`) | `artifacts.run_dir`, `artifacts.robot_screenshot`, `vlm_response.semantic_context.robot_intent`, `vlm_response.python_code`, `scenario_expected_response`, `scenario_id`, `method`. |
+| `evaluation/judge.py` (`judge_one`, `_find_images`, `_cache_key`) | `artifacts.run_dir`, `artifacts.robot_motion_contact_sheet` (preferred), `artifacts.robot_screenshot` (fallback), `vlm_response.semantic_context.robot_intent`, `vlm_response.python_code`, `scenario_expected_response`, `scenario_id`, `method`. |
 | `evaluation/judge.py` (`write_report`) | `scenario_id`, `method`. |
 
 ---

@@ -52,7 +52,13 @@ def _find_images(result: Dict[str, Any]) -> Tuple[Path | None, Path | None]:
     input_frame = run_dir / 'frame_01.jpg'
     if not input_frame.exists():
         input_frame = None
-    robot = Path(artifacts.get('robot_screenshot') or '')
+    # Prefer the multi-frame motion contact sheet so the judge sees the motion
+    # as a sequence; fall back to the single final screenshot.
+    robot = Path(artifacts.get('robot_motion_contact_sheet') or '')
+    if not robot.exists():
+        robot = run_dir / 'robot_motion_contact_sheet.jpg'
+    if not robot.exists():
+        robot = Path(artifacts.get('robot_screenshot') or '')
     if not robot.exists():
         robot = run_dir / 'robot_response.png'
     if not robot.exists():
@@ -75,8 +81,10 @@ def judge_one(client, model: str, result: Dict[str, Any], input_frame: Path, rob
     ctx = (result.get('vlm_response') or {}).get('semantic_context') or {}
     robot_intent = ctx.get('robot_intent') or result.get('scenario_expected_response') or ''
     prompt = (
-        'You are judging a humanoid robot response. The first image is the human input; '
-        'the second image is the robot response after executing its generated motion. '
+        'You are judging a humanoid robot response. The first image is the human input. '
+        'The second image is the robot response: it may be a single frame, or a '
+        'left-to-right sequence of frames sampled during the motion (read it as the '
+        'motion over time). '
         'Return only JSON with pass:boolean and rationale:string <=30 words. '
         f'Expected/claimed robot intent: {robot_intent}'
     )
