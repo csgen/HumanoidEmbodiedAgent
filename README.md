@@ -82,15 +82,6 @@ python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method rule
 python -m evaluation.judge artifacts/eval/*.json --output artifacts/eval/report.md
 ```
 
-For Docker-based Linux/Webots evaluation from macOS:
-
-```bash
-docker build -f docker/Dockerfile -t humanoid-webots:phase5 .
-docker run --rm -v "$PWD:/workspace" -e llm_api_key="$OPENAI_API_KEY" \
-  humanoid-webots:phase5 \
-  python3 -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method cap --headless
-```
-
 ### 7. Live Camera Demo
 Native Linux webcam:
 
@@ -98,12 +89,11 @@ Native Linux webcam:
 INPUT_MODE=webcam WEBCAM_SOURCE=0 RUN_MODE=periodic webots nao_VLM/worlds/nao_VLM.wbt
 ```
 
-Mac camera into Docker or a remote Linux session:
+Laptop camera into a remote Linux session (e.g. a cloud VM running Webots):
 
 ```bash
 python3 scripts/local_camera_server.py --source 0 --port 5000 --fps 10
-# Docker controller: WEBCAM_SOURCE=http://host.docker.internal:5000/video_feed
-# SSH-tunneled remote/HPC controller: WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed
+# SSH-tunneled remote controller: WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed
 ```
 
 Then launch the live controller with:

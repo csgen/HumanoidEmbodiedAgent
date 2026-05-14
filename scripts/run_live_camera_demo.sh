@@ -46,7 +46,6 @@ echo "[live] wrote $REPO_DIR/.env"
 echo "[live] WEBCAM_SOURCE=$WEBCAM_SOURCE_VALUE"
 echo "[live] examples:"
 echo "       native Linux webcam: WEBCAM_SOURCE=0"
-echo "       Mac -> Docker:       WEBCAM_SOURCE=http://host.docker.internal:5000/video_feed"
 echo "       SSH tunnel remote:   WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed"
 
 cd "$REPO_DIR"

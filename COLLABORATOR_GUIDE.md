@@ -30,7 +30,6 @@ override.
 - `debug_video_samples/`：调试样例视频
 - `artifacts/screen_recordings_matched/`：最终对外展示的录屏成片
 - `evaluation/`：Phase 5 benchmark、metrics、rule baseline、VLM-as-Judge
-- `docker/Dockerfile`：Linux/Webots 评测容器
 - `LOCAL_VLM_DEMO_STATUS.md`：当前阶段和近期进展
 - `Humanoid Embodied Agent — Proposal vs Current Implementation Analysis & Refined Plan.md`：总阶段规划
 
@@ -61,7 +60,6 @@ override.
 - `WEBOTS_BIN=/path/to/webots`
 - `PYTHON_BIN=/path/to/python`
 - `WEBCAM_SOURCE=0` 本机 Linux 摄像头
-- `WEBCAM_SOURCE=http://host.docker.internal:5000/video_feed` Mac 摄像头进 Docker
 - `WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed` SSH tunnel 后的远程摄像头
 
 ## 录屏产物

@@ -1,3 +1,6 @@
+# Phase-5 benchmark harness. It runs the Webots controller per scenario,
+# then reads + augments each run's result.json.
+# result.json schema (Stage 1 + Stage 2 keys): see evaluation/RESULT_SCHEMA.md.
 from __future__ import annotations
 
 import argparse

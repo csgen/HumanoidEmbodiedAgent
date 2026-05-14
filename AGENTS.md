@@ -11,7 +11,6 @@ This file is the root-level handoff for future agents and collaborators. The sho
 - Active VLM controller config: `nao_VLM/controllers/nao_vlm_test/config.py`.
 - Main planning doc: `Humanoid Embodied Agent — Proposal vs Current Implementation Analysis & Refined Plan.md`.
 - Mac ROS notes: `SamLearningsMacROS.md` is useful context but low signal for this repo's main path. Do not revive ROS unless explicitly asked.
-- HPC notes: `HPC/agents.md` contains generic HPC transfer knowledge. Treat HPC as optional for local/GPU VLM experiments, not the primary Webots evaluation path.
 
 ## Phase 5 Decision
 
@@ -57,7 +56,7 @@ What Phase 5 adds:
 - Offline metrics: execution success, safety adherence, fallback count, jerk, and CoM excursion proxy.
 - A fair rule-based baseline that uses the same video input, sandbox, and execution path but replaces generative code with `intent label -> fixed code`.
 - Optional VLM-as-Judge report generation.
-- Portable script paths, Docker scaffolding, and Sam's local Webots/macOS env.
+- Portable script paths and Sam's local Webots/macOS env.
 
 Why this is academically stronger than a plain API integration:
 
@@ -190,7 +189,7 @@ Phase 4: Safety and robustness
 Added sandbox validation, joint typo tolerance, forbidden lower-body constraints, fallback retry/replay/idle policy, and local VLM hooks.
 
 Phase 5: Evaluation  
-This is what we added: metrics recorder, benchmark runner, scenario registry, rule baseline, judge scaffolding, Docker support, portable paths, Mac Webots env, and successful baseline/CaP smoke tests.
+This is what we added: metrics recorder, benchmark runner, scenario registry, rule baseline, judge scaffolding, portable paths, Mac Webots env, and successful baseline/CaP smoke tests.
 
 ## Phase 5 Additions
 
@@ -263,7 +262,7 @@ Implementation and unit tests do not need an API key. CaP benchmark runs and jud
 
 ## How To Test
 
-Start with pure local checks. These do not require Webots, Docker, ROS, or an API key:
+Start with pure local checks. These do not require Webots, ROS, or an API key:
 
 ```bash
 /Users/SamarthSoni/miniforge3/envs/humanoid_webots_vlm/bin/python -m unittest tests/test_phase5_evaluation.py
@@ -426,23 +425,6 @@ High-value optional upgrades:
 
 I would **not** bolt on RL now. It would likely look rushed. The stronger play is to finish the proposal’s evaluation promises and make the sophistication visible.
 
-## Docker Path
-
-Docker is recommended for reproducible Linux/Webots runs from macOS, but it is not required for teammate native Linux usage. The Docker image is defined in:
-
-- `docker/Dockerfile`
-
-Build and run:
-
-```bash
-docker build -f docker/Dockerfile -t humanoid-webots:phase5 .
-docker run --rm -v "$PWD:/workspace" -e llm_api_key="$OPENAI_API_KEY" \
-  humanoid-webots:phase5 \
-  python3 -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method cap --headless
-```
-
-If Docker Desktop is not installed on macOS, this path is unavailable until it is installed and running.
-
 ## Live Camera Demo
 
 Native Linux webcam:
@@ -451,19 +433,13 @@ Native Linux webcam:
 WEBCAM_SOURCE=0 bash scripts/run_live_camera_demo.sh
 ```
 
-Mac camera exported to Docker or remote Linux:
+Laptop camera streamed to a remote Linux session (e.g. a cloud VM running Webots):
 
 ```bash
 python3 scripts/local_camera_server.py --source 0 --port 5000 --fps 10
 ```
 
-Use this source inside Docker on Mac:
-
-```bash
-WEBCAM_SOURCE=http://host.docker.internal:5000/video_feed
-```
-
-Use this source on a remote/HPC Linux session only after setting up an SSH reverse tunnel:
+Use this source on the remote Linux session after setting up an SSH reverse tunnel:
 
 ```bash
 WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed
@@ -475,7 +451,7 @@ Do not treat Webots as the same problem as ROS/Gazebo on macOS.
 
 ROS 2 + Gazebo tends to be painful on macOS because ROS support and robotics sim dependencies are much more Linux-centered. This repo's current stack avoids that by using Webots directly with a Python controller. Webots itself has a Mac application, so native Mac use is plausible for editing and visual demos.
 
-However, the benchmark still depends on Webots launching the controller with a Python environment that has Pinocchio, NumPy, OpenCV, OpenAI, and other deps. That means Mac can still fail on Python binary/dependency issues even though it is not a ROS/Gazebo issue. For reproducible grading/report runs, Linux Webots through Docker or a teammate's native Linux machine remains cleaner.
+However, the benchmark still depends on Webots launching the controller with a Python environment that has Pinocchio, NumPy, OpenCV, OpenAI, and other deps. That means Mac can still fail on Python binary/dependency issues even though it is not a ROS/Gazebo issue. For reproducible grading/report runs, a teammate's native Linux machine remains cleaner.
 
 As of 2026-05-10 on Sam's Mac:
 
@@ -483,7 +459,6 @@ As of 2026-05-10 on Sam's Mac:
 - `nao_VLM/controllers/nao_vlm_test/runtime.ini` points Webots at that env's Python. It is machine-specific and gitignored.
 - `webots` is not on PATH.
 - `/Applications/Webots.app/Contents/MacOS/webots --version` reports `R2025a`.
-- `docker` is not on PATH.
 - Pure Python Phase 5 tests pass locally.
 - One no-key rule-baseline Webots smoke test passed locally: `rule_baseline_20260510_232147__rule_baseline__pilot_waving__r01` had `status=ok`, `webots_returncode=0`, `execution_success=1.0`, `safety_adherence=1.0`, and 940 joint-state samples.
 

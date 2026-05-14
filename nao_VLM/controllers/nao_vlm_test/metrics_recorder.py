@@ -4,6 +4,9 @@ Phase-5 metrics recorder for Webots controller runs.
 The recorder is intentionally passive: nothing is created unless
 METRICS_RUN_ID is set. Controller code can call it freely without changing
 normal demo behavior.
+
+result.json schema (the dict passed to write_result()): see
+evaluation/RESULT_SCHEMA.md.
 """
 from __future__ import annotations
 
