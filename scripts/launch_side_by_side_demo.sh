@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="/home/darian/桌面/humanoidRobot"
-WEBOTS_BIN="/home/darian/.local/opt/webots/webots"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+WEBOTS_BIN="${WEBOTS_BIN:-$(command -v webots || true)}"
 WORLD_FILE="$REPO_DIR/nao_VLM/worlds/nao_VLM.wbt"
-FFPLAY_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/ffplay"
-WMCTRL_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/wmctrl"
+FFPLAY_BIN="${FFPLAY_BIN:-$(command -v ffplay || true)}"
+WMCTRL_BIN="${WMCTRL_BIN:-$(command -v wmctrl || true)}"
 XPROP_BIN="/usr/bin/xprop"
 
 VIDEO_PATH="${1:-$REPO_DIR/example_video/webcam_20260425_072825.mp4}"
@@ -20,17 +21,17 @@ WEBOTS_LOG="${WEBOTS_LOG:-/tmp/demo_webots.log}"
 STARTUP_SLEEP="${STARTUP_SLEEP:-1}"
 
 if [[ ! -f "$VIDEO_PATH" ]]; then
-  echo "[错误] 视频不存在: $VIDEO_PATH"
+  echo "[Error] [错误] Video does not exist: [视频不存在:] $VIDEO_PATH"
   exit 1
 fi
 
 if [[ ! -x "$WEBOTS_BIN" ]]; then
-  echo "[错误] Webots 不存在或不可执行: $WEBOTS_BIN"
+  echo "[Error] [错误] Webots missing or not executable: [Webots 不存在或不可执行:] $WEBOTS_BIN"
   exit 1
 fi
 
 if [[ ! -x "$FFPLAY_BIN" ]]; then
-  echo "[错误] ffplay 不存在: $FFPLAY_BIN"
+  echo "[Error] [错误] ffplay does not exist: [ffplay 不存在:] $FFPLAY_BIN"
   exit 1
 fi
 
@@ -93,12 +94,12 @@ if [[ -x "$WMCTRL_BIN" ]]; then
   done
 fi
 
-echo "已写入 .env 并启动对照演示。"
-echo "左侧源视频: $VIDEO_PATH"
-echo "右侧 Webots: $WORLD_FILE"
+echo "Written to .env and started comparative demo. [已写入 .env 并启动对照演示。]"
+echo "Left source video: [左侧源视频:] $VIDEO_PATH"
+echo "Right Webots: [右侧 Webots:] $WORLD_FILE"
 echo "ffplay PID=$FFPLAY_PID"
 echo "webots PID=$WEBOTS_PID"
-echo "可直接开始录屏。"
+echo "Ready to start screen recording. [可直接开始录屏。]"
 
 if [[ "${PRINT_PIDS_ONLY:-0}" == "1" ]]; then
   printf 'FFPLAY_PID=%s\nWEBOTS_PID=%s\n' "$FFPLAY_PID" "$WEBOTS_PID"

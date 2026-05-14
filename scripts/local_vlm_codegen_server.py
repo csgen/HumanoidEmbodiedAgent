@@ -8,7 +8,9 @@ from pathlib import Path
 from flask import Flask, jsonify, request
 
 
-REPO_DIR = Path('/home/darian/桌面/humanoidRobot')
+import sys
+from pathlib import Path
+REPO_DIR = Path(__file__).resolve().parent.parent
 CTRL_DIR = REPO_DIR / 'nao_VLM' / 'controllers' / 'nao_vlm_test'
 sys.path.insert(0, str(CTRL_DIR))
 

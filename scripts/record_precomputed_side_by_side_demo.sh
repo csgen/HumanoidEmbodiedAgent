@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="/home/darian/桌面/humanoidRobot"
-CONDA_PY="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/python"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+CONDA_PY="${CONDA_PY:-python3}"
 PRECOMPUTE_PY="$REPO_DIR/scripts/precompute_vlm_code_from_video.py"
 LAUNCH_SCRIPT="$REPO_DIR/scripts/launch_side_by_side_demo.sh"
 RECORD_PY="$REPO_DIR/scripts/screen_record_region.py"
 PREVENT_SLEEP_SCRIPT="$REPO_DIR/scripts/prevent_display_sleep.sh"
 
-VIDEO_PATH="${1:?请传入视频路径}"
-OUT_MP4="${2:?请传入输出 mp4 路径}"
+VIDEO_PATH="${1:?Please provide video path [请传入视频路径]}"
+OUT_MP4="${2:?Please provide output mp4 path [请传入输出 mp4 路径]}"
 MODEL_ID="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 WORK_DIR="${WORK_DIR:-$REPO_DIR/artifacts/precomputed_demo}"
 VLM_FRAME_COUNT_VALUE="${VLM_FRAME_COUNT:-4}"
@@ -27,7 +28,7 @@ DISPLAY=:0 bash "$PREVENT_SLEEP_SCRIPT" >/tmp/prevent_display_sleep.log 2>&1 &
 SLEEP_PID=$!
 
 cleanup() {
-  pkill -f "/home/darian/.local/opt/webots/webots" 2>/dev/null || true
+  pkill -f "webots" 2>/dev/null || true
   pkill -f "ffplay.*Demo-" 2>/dev/null || true
   kill "$SLEEP_PID" 2>/dev/null || true
 }
@@ -43,7 +44,7 @@ else
 fi
 
 if [[ ! -s "$CODE_PATH" ]]; then
-  echo "[错误] 预计算代码为空: $CODE_PATH"
+  echo "[Error] [错误] Precomputed code is empty: [预计算代码为空:] $CODE_PATH"
   exit 1
 fi
 
@@ -81,4 +82,4 @@ DISPLAY=:0 "$CONDA_PY" "$RECORD_PY" \
 
 wait "$LAUNCH_PID" || true
 
-echo "[完成] $OUT_MP4"
+echo "[Complete] [完成] $OUT_MP4"

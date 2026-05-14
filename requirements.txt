@@ -15,3 +15,7 @@ requests>=2.28.0
 
 # Local camera server (only needed on the laptop streaming to cloud)
 flask>=2.3.0
+
+# Demo recording / image helpers
+mss>=9.0.0
+pillow>=10.0.0

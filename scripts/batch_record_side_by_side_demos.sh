@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_DIR="/home/darian/桌面/humanoidRobot"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 LAUNCH_SCRIPT="$REPO_DIR/scripts/launch_side_by_side_demo.sh"
-FFMPEG_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/ffmpeg"
-WMCTRL_BIN="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/wmctrl"
+FFMPEG_BIN="${FFMPEG_BIN:-$(command -v ffmpeg || true)}"
+WMCTRL_BIN="${WMCTRL_BIN:-$(command -v wmctrl || true)}"
 XWININFO_BIN="/usr/bin/xwininfo"
-CONDA_PY="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/python"
+CONDA_PY="${CONDA_PY:-python3}"
 SCREEN_RECORD_PY="$REPO_DIR/scripts/screen_record_region.py"
 PREVENT_SLEEP_SCRIPT="$REPO_DIR/scripts/prevent_display_sleep.sh"
 LOCAL_VLM_SERVER_PY="$REPO_DIR/scripts/local_vlm_codegen_server.py"
@@ -33,27 +34,27 @@ STARTUP_GRACE="${STARTUP_GRACE:-8}"
 mkdir -p "$OUT_DIR"
 
 if [[ ! -x "$CONDA_PY" ]]; then
-  echo "[错误] conda python 不存在: $CONDA_PY"
+  echo "[Error] [错误] conda python does not exist: [conda python 不存在:] $CONDA_PY"
   exit 1
 fi
 
 if [[ ! -x "$LAUNCH_SCRIPT" ]]; then
-  echo "[错误] 启动脚本不存在: $LAUNCH_SCRIPT"
+  echo "[Error] [错误] Launch script does not exist: [启动脚本不存在:] $LAUNCH_SCRIPT"
   exit 1
 fi
 
 if [[ ! -f "$SCREEN_RECORD_PY" ]]; then
-  echo "[错误] 录屏脚本不存在: $SCREEN_RECORD_PY"
+  echo "[Error] [错误] Screen record script does not exist: [录屏脚本不存在:] $SCREEN_RECORD_PY"
   exit 1
 fi
 
 if [[ ! -x "$PREVENT_SLEEP_SCRIPT" ]]; then
-  echo "[错误] 防休眠脚本不存在或不可执行: $PREVENT_SLEEP_SCRIPT"
+  echo "[Error] [错误] Prevent sleep script missing or not executable: [防休眠脚本不存在或不可执行:] $PREVENT_SLEEP_SCRIPT"
   exit 1
 fi
 
 cleanup_run() {
-  pkill -f "/home/darian/.local/opt/webots/webots" 2>/dev/null || true
+  pkill -f "webots" 2>/dev/null || true
   pkill -f "ffplay.*Demo Source Video" 2>/dev/null || true
   pkill -f "ffplay.*Demo-" 2>/dev/null || true
 }
@@ -98,13 +99,13 @@ start_local_vlm_server() {
       curl -fsS -X POST "$LOCAL_VLM_SERVER_URL/warmup" \
         -H 'Content-Type: application/json' \
         -d "{\"model\": \"$MODEL_ID\"}" >/dev/null 2>&1 || true
-      echo "[信息] 本地 VLM 服务已就绪: $LOCAL_VLM_SERVER_URL"
+      echo "[Info] [信息] Local VLM server is ready: [本地 VLM 服务已就绪:] $LOCAL_VLM_SERVER_URL"
       return
     fi
     sleep 2
   done
 
-  echo "[错误] 本地 VLM 服务启动超时: $LOCAL_VLM_SERVER_URL"
+  echo "[Error] [错误] Local VLM server start timeout: [本地 VLM 服务启动超时:] $LOCAL_VLM_SERVER_URL"
   exit 1
 }
 
@@ -116,7 +117,7 @@ detect_screen_layout() {
     dims="$(DISPLAY=:0 xdpyinfo 2>/dev/null | awk '/dimensions:/ {print $2; exit}')"
   fi
   if [[ ! "$dims" =~ ^([0-9]+)x([0-9]+)$ ]]; then
-    echo "[错误] 无法检测桌面分辨率。"
+    echo "[Error] [错误] Cannot detect desktop resolution. [无法检测桌面分辨率。]"
     exit 1
   fi
 
@@ -210,22 +211,22 @@ PY
   cleanup_run
   sleep 2
 
-  echo "[完成] $out_path"
+  echo "[Complete] [完成] $out_path"
 }
 
 if [[ "$USE_SHORTLIST" == "1" ]]; then
   while IFS= read -r video_path; do
     [[ -n "$video_path" ]] || continue
     [[ -f "$video_path" ]] || continue
-    echo "[开始] $(basename "$video_path")"
+    echo "[Start] [开始] $(basename "$video_path")"
     record_one "$video_path"
   done < <(build_shortlist)
 else
   shopt -s nullglob
   for video_path in "$SAMPLES_DIR"/*.mp4; do
-    echo "[开始] $(basename "$video_path")"
+    echo "[Start] [开始] $(basename "$video_path")"
     record_one "$video_path"
   done
 fi
 
-echo "全部录制完成，输出目录：$OUT_DIR"
+echo "All recordings completed, output directory: [全部录制完成，输出目录：]$OUT_DIR"

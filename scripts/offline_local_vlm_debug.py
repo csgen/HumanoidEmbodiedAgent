@@ -11,7 +11,9 @@ from pathlib import Path
 import cv2
 
 
-REPO_DIR = Path('/home/darian/桌面/humanoidRobot')
+import sys
+from pathlib import Path
+REPO_DIR = Path(__file__).resolve().parent.parent
 CTRL_DIR = REPO_DIR / 'nao_VLM' / 'controllers' / 'nao_vlm_test'
 sys.path.insert(0, str(CTRL_DIR))
 
@@ -23,7 +25,7 @@ from sandbox_exec import SandboxExecutor
 def sample_video_frames(path: Path, n: int) -> list[str]:
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
-        raise RuntimeError(f'无法打开视频: {path}')
+        raise RuntimeError(f'Cannot open video: [无法打开视频:] {path}')
 
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     if total <= 0:
@@ -125,7 +127,7 @@ def build_runtime_signature_executor() -> SandboxExecutor:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument('videos', nargs='+', help='一个或多个 mp4 路径')
+    parser.add_argument('videos', nargs='+', help='One or more mp4 paths [一个或多个 mp4 路径]')
     parser.add_argument('--model', default=os.environ.get('LOCAL_VLM_MODEL', config.LOCAL_VLM_MODEL))
     parser.add_argument('--frames', type=int, default=int(os.environ.get('VLM_FRAME_COUNT', config.VLM_FRAME_COUNT)))
     args = parser.parse_args()
@@ -140,7 +142,7 @@ def main() -> int:
             path = (REPO_DIR / path).resolve()
         print(f'\n===== {path.name} =====')
         frames_b64 = sample_video_frames(path, args.frames)
-        print(f'采样帧数: {len(frames_b64)}')
+        print(f'Sampled frame count: [采样帧数:] {len(frames_b64)}')
         summary = vlm_client._infer_visual_motion_summary(frames_b64)
         print('motion_summary=')
         print(json.dumps(summary, ensure_ascii=False, indent=2))

@@ -1,5 +1,21 @@
 # 本地 VLM 视频到机器人响应 Demo 状态说明
 
+## English Summary
+
+This document is a historical status log for the local VLM demo work. The main
+takeaway is that the project moved from static/video demos into a working
+pipeline:
+
+`input video -> VLM-generated primitive code -> sandbox validation -> Webots NAO execution -> side-by-side recording`
+
+The current merged system avoids gesture-label-to-template dispatch and instead
+asks the VLM to compose low-level primitives such as `move_arm_ik`, `move_joints`,
+`move_head`, `set_hand`, `oscillate_joint`, `hold`, and `idle`. The strongest
+remaining work is Phase 5: reproducible evaluation, metrics, rule-baseline
+comparison, and VLM-as-Judge reporting. Local Qwen/Qwen2.5-VL support is useful
+for demos and GPU machines, but Phase 5 defaults to cloud OpenAI for stable,
+repeatable evaluation.
+
 ## 当前目标
 
 本分支当前已经打通如下演示链路：
