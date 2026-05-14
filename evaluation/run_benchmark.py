@@ -187,7 +187,11 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument('--scenario-set', default='pilot', choices=['pilot', 'canonical', 'all'])
     parser.add_argument('--scenarios', nargs='*', help='Optional scenario ids inside the selected set')
     parser.add_argument('--rounds', type=int, default=1)
-    parser.add_argument('--method', choices=['cap', 'rule_baseline'], default='cap')
+    parser.add_argument('--method', choices=['cap', 'rule_baseline', 'both'], default='cap',
+                        help="'both' runs rule_baseline then cap into one aggregate.")
+    parser.add_argument('--judge', action='store_true',
+                        help='After the benchmark, run the VLM-as-Judge on the aggregate '
+                             'this run produced (uses the exact file path, no shell glob).')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--timeout-s', type=float, default=180.0)
     parser.add_argument('--output-dir', type=Path, default=REPO_ROOT / 'artifacts' / 'eval')
@@ -198,35 +202,47 @@ def main(argv: List[str] | None = None) -> int:
         print(f'No existing videos found for scenario set {args.scenario_set!r}.', file=sys.stderr)
         return 1
 
+    methods = ['rule_baseline', 'cap'] if args.method == 'both' else [args.method]
     run_group = time.strftime(f'{args.method}_%Y%m%d_%H%M%S')
     results: List[Dict[str, Any]] = []
-    for round_index in range(1, max(1, args.rounds) + 1):
-        for spec in scenarios:
-            print(f'[benchmark] {args.method} {spec.id} round {round_index}/{args.rounds}')
-            try:
-                results.append(
-                    run_one(
-                        spec,
-                        method=args.method,
-                        round_index=round_index,
-                        run_group=run_group,
-                        headless=args.headless,
-                        timeout_s=args.timeout_s,
+    for method in methods:
+        for round_index in range(1, max(1, args.rounds) + 1):
+            for spec in scenarios:
+                print(f'[benchmark] {method} {spec.id} round {round_index}/{args.rounds}')
+                try:
+                    results.append(
+                        run_one(
+                            spec,
+                            method=method,
+                            round_index=round_index,
+                            run_group=run_group,
+                            headless=args.headless,
+                            timeout_s=args.timeout_s,
+                        )
                     )
-                )
-            except subprocess.TimeoutExpired as exc:
-                # run_one normally handles timeouts so it can salvage a
-                # completed result.json. Keep this as a defensive fallback.
-                results.append({
-                    'run_id': f'{run_group}__{args.method}__{spec.id}__r{round_index:02d}',
-                    'scenario_id': spec.id,
-                    'method': args.method,
-                    'status': 'timeout',
-                    'exec_outcome': {'ok': False, 'error': str(exc)},
-                    'metrics': {'execution_success': 0.0, 'safety_adherence': 0.0},
-                })
+                except subprocess.TimeoutExpired as exc:
+                    # run_one normally handles timeouts so it can salvage a
+                    # completed result.json. Keep this as a defensive fallback.
+                    results.append({
+                        'run_id': f'{run_group}__{method}__{spec.id}__r{round_index:02d}',
+                        'scenario_id': spec.id,
+                        'method': method,
+                        'status': 'timeout',
+                        'exec_outcome': {'ok': False, 'error': str(exc)},
+                        'metrics': {'execution_success': 0.0, 'safety_adherence': 0.0},
+                    })
     aggregate = write_aggregate(results, args.output_dir, run_group)
     print(f'[benchmark] wrote {aggregate}')
+
+    if args.judge:
+        # Run the VLM-as-Judge on exactly the aggregate just written — no shell
+        # glob, no manual filename juggling. judge.main() is argv-driven and
+        # skips gracefully (writes a notice, returns 0) if no API key is set.
+        from evaluation import judge
+        report_path = args.output_dir / f'{run_group}_report.md'
+        print(f'[benchmark] running VLM-as-Judge -> {report_path}')
+        judge.main([str(aggregate), '--output', str(report_path)])
+
     return 0
 
 
