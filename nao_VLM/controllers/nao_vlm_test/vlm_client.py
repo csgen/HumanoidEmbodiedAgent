@@ -18,6 +18,7 @@ import difflib
 import io
 import json
 import math
+import random
 import re
 import textwrap
 import time
@@ -104,6 +105,30 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - React naturally rather than mimic exactly; the response should feel socially appropriate.
 - Avoid exaggerated repeated oscillations unless the video strongly supports them.
 - Prefer nonverbal motion only in this demo stage.
+
+# Response styles
+Each call you receive an "Assigned response_style" line in the user message.
+Compose your response in that style. The ONLY override you may apply is
+"shrug" when your confidence is below 0.4 or the human's intent is genuinely
+ambiguous from the frames.
+
+The four styles are:
+
+- complementary: a socially-appropriate matching action (default register).
+  Wave back at a wave. Tilt head at curiosity. Engaged forward pose at an
+  approach.
+- mimic: deliberately mirror the human's gesture. Use the arm on the SAME
+  side of the camera frame as the human's active arm (the camera mirrors
+  the human, so a wave with the human's right hand appears on the LEFT side
+  of the frame and is mimicked with the robot's LEFT arm).
+- dramatic: a deliberately exaggerated or comic reaction. Stay within
+  validator caps (oscillation amplitude <= 0.7 rad, frequency <= 2.5 Hz).
+- shrug: an "I don't know" / no-opinion gesture with symmetric arms spread
+  and palms open. The one case where bilateral both-arm motion is the
+  readable pattern.
+
+Put the style you actually used (which may equal the assigned style, or
+"shrug" if you overrode) in the JSON output's "response_style" field.
 
 # NAO coordinate convention
 - Torso-centred, right-hand frame. Units are METRES.
@@ -195,6 +220,7 @@ First a JSON block, THEN a Python block, and nothing else:
   "confidence": <float 0.0-1.0>,
   "motion_dynamics": "oscillatory" | "approaching" | "retreating" |
                      "raising" | "lowering" | "static",
+  "response_style": "complementary" | "mimic" | "dramatic" | "shrug",
   "robot_intent": "<short description of how the ROBOT should respond, in
                    plain English; should match what the Python code below
                    actually does — e.g. 'wave back with right hand, warm
@@ -342,6 +368,27 @@ _LOCAL_MODEL_ID: Optional[str] = None
 _LOCAL_PROCESSOR = None
 _LOCAL_MODEL = None
 _LOCAL_MODEL_KIND: Optional[str] = None
+
+
+def sample_response_style(
+    weights: Dict[str, float],
+    rng: Optional[random.Random] = None,
+) -> str:
+    """Sample one of {complementary, mimic, dramatic} weighted by `weights`.
+
+    The shrug style is intentionally not sampled here — it is a confidence-
+    driven override the VLM applies when the assigned style does not fit
+    the clip (see the Response styles block in _BASE_SYSTEM_PROMPT).
+
+    Pass a seeded `random.Random` to make the choice deterministic. Used by
+    the evaluation harness to keep style choice reproducible per scenario.
+    """
+    rng = rng or random
+    names = list(weights.keys())
+    raw = [max(0.0, float(weights[n])) for n in names]
+    total = sum(raw) or 1.0
+    normalized = [v / total for v in raw]
+    return rng.choices(names, weights=normalized, k=1)[0]
 
 
 def build_system_prompt(joint_limits: Dict[str, Tuple[float, float]]) -> str:
@@ -1981,6 +2028,48 @@ class VLMClient:
         else:
             self.model = model or config.LOCAL_VLM_MODEL
 
+        # Response-style sampling state (Step 3 Stage A). When `_pinned_style`
+        # is set, every call uses that exact style instead of sampling — used
+        # for tests. `_style_rng`, when set via seed_style(), makes the
+        # sampler deterministic for evaluation reproducibility.
+        # `_last_assigned_style` is read by the controller after each call
+        # so it can be logged into result.json.
+        self._pinned_style: Optional[str] = None
+        self._style_rng: Optional[random.Random] = None
+        self._last_assigned_style: Optional[str] = None
+
+    # ------------------------------------------------------------------ style controls
+
+    def pin_style(self, style: Optional[str]) -> None:
+        """Force every subsequent call to use this style (or None to resume sampling)."""
+        self._pinned_style = style
+
+    def seed_style(self, seed: int) -> None:
+        """Seed the per-call style sampler for deterministic evaluation runs."""
+        self._style_rng = random.Random(int(seed))
+
+    @property
+    def last_assigned_style(self) -> Optional[str]:
+        return self._last_assigned_style
+
+    def _assign_style_for_call(self) -> str:
+        """Pick the response_style for the next call; cache it on the client."""
+        style = self._pinned_style or sample_response_style(
+            config.RESPONSE_STYLE_WEIGHTS, self._style_rng
+        )
+        self._last_assigned_style = style
+        return style
+
+    @staticmethod
+    def _style_directive(style: str) -> str:
+        return (
+            f"\n\nAssigned response_style for this call: **{style}**.\n"
+            f"Compose your response in this style UNLESS your confidence is "
+            f"below 0.4 or the human's intent is genuinely ambiguous from "
+            f"the frames, in which case override to \"shrug\". Include "
+            f"\"response_style\": \"<chosen>\" in your JSON output."
+        )
+
     def call(self, frames_b64: Sequence[str]) -> VLMResponse:
         if self.backend == 'openai':
             return self._call_openai(frames_b64)
@@ -1995,7 +2084,9 @@ class VLMClient:
         if not frames_b64:
             return VLMResponse({}, '', '', 0.0, False, error='no frames provided')
 
-        content: List[Dict[str, Any]] = [{"type": "text", "text": _USER_PROMPT}]
+        assigned_style = self._assign_style_for_call()
+        user_text = _USER_PROMPT + self._style_directive(assigned_style)
+        content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
         for img_b64 in frames_b64:
             content.append({
                 'type': 'image_url',
@@ -2047,6 +2138,11 @@ class VLMClient:
 
             summary = _infer_visual_motion_summary(frames_b64)
             user_prompt = _build_local_user_prompt(frames_b64)
+            # Step 3 Stage A: append the per-call assigned response_style.
+            # Local repair/refinement loops below run with the same assignment
+            # (the directive is stable across the candidate-sampling loop).
+            assigned_style = self._assign_style_for_call()
+            user_prompt = user_prompt + self._style_directive(assigned_style)
             candidate_count = max(1, int(config.LOCAL_VLM_NUM_CANDIDATES))
             raw_candidates: List[str] = []
 

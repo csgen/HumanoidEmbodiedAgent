@@ -975,6 +975,12 @@ def _run_oneshot_demo(
         suffix = f' - {detail}' if detail else ''
         print(f'[oneshot +{elapsed:06.2f}s] {name}{suffix}')
 
+    def _assigned_style() -> Optional[str]:
+        """Read the response_style the VLM client sampled for the most recent call.
+        Returns None on clients that don't track style (e.g. RuleBaselineClient)
+        or when no call has been made yet."""
+        return getattr(client, 'last_assigned_style', None)
+
     stage('waiting_for_frames', f'target={config.VLM_FRAME_COUNT} source={config.WEBCAM_SOURCE!r}')
     ready = _wait_for_frame_buffer(
         robot=robot,
@@ -1052,6 +1058,7 @@ def _run_oneshot_demo(
                 'input': {'mode': config.INPUT_MODE, 'source': str(config.WEBCAM_SOURCE)},
                 'frames_count': len(frames),
                 'vlm_response': {},
+                'assigned_response_style': _assigned_style(),
                 'exec_outcome': _exec_payload(None),
                 'fallback_stats': fallback.stats(),
                 'timeline': timeline,
@@ -1065,6 +1072,7 @@ def _run_oneshot_demo(
                 'input': {'mode': config.INPUT_MODE, 'source': str(config.WEBCAM_SOURCE)},
                 'frames_count': len(frames),
                 'vlm_response': {'error': str(rsp)},
+                'assigned_response_style': _assigned_style(),
                 'exec_outcome': _exec_payload(None),
                 'fallback_stats': fallback.stats(),
                 'timeline': timeline,
@@ -1141,6 +1149,7 @@ def _run_oneshot_demo(
             'input': {'mode': config.INPUT_MODE, 'source': str(config.WEBCAM_SOURCE)},
             'frames_count': len(frames),
             'vlm_response': _response_payload(rsp),
+            'assigned_response_style': _assigned_style(),
             'exec_outcome': _exec_payload(exec_result),
             'fallback_stats': fallback.stats(),
             'artifact_dir': str(artifact_dir),
@@ -1212,6 +1221,8 @@ def _run_replay_demo(
                 'error': None,
                 'elapsed_seconds': 0.0,
             },
+            # Replay mode does not sample a response_style (no live VLM call).
+            'assigned_response_style': None,
             'exec_outcome': _exec_payload(result),
             'fallback_stats': {},
             'artifact_dir': str(metrics_recorder.run_dir),
@@ -1288,6 +1299,18 @@ def main():
                 client = RuleBaselineClient(joint_limits=vlm_api.get_joint_limits())
             else:
                 client = VLMClient(joint_limits=vlm_api.get_joint_limits())
+                # Step 3 Stage A: when running under the evaluation harness
+                # (both METRICS_RUN_ID and EVAL_SCENARIO_ID set), seed the
+                # response-style sampler deterministically so a given
+                # (run_id, scenario_id) always picks the same assigned style.
+                # Cross-run variance is still preserved across different
+                # METRICS_RUN_IDs.
+                if config.METRICS_RUN_ID and config.EVAL_SCENARIO_ID:
+                    import hashlib
+                    seed_material = f"{config.METRICS_RUN_ID}:{config.EVAL_SCENARIO_ID}".encode()
+                    style_seed = int.from_bytes(hashlib.sha256(seed_material).digest()[:8], 'big')
+                    client.seed_style(style_seed)
+                    print(f'[init] response-style RNG seeded: seed_material={seed_material.decode()}')
             print(f'[init] VLMClient ready, model={client.model}')
         except Exception as e:
             print(f'[init] VLMClient disabled: {e}')

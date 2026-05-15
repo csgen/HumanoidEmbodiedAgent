@@ -77,6 +77,18 @@ METRICS_OUTPUT_DIR = os.getenv('METRICS_OUTPUT_DIR', '').strip()
 EVAL_SCENARIO_ID = os.getenv('EVAL_SCENARIO_ID', '').strip()
 EVAL_METHOD = os.getenv('EVAL_METHOD', '').strip().lower()
 
+# Response-style sampling (Step 3 Stage A). Each VLM call is stateless, so the
+# controller samples one of these styles in code and injects the assigned style
+# into the per-call user message. Weights are env-overridable so the team can
+# rebalance without code edits. `shrug` is intentionally NOT sampled here —
+# the VLM applies it as a confidence-driven override when the assigned style
+# does not fit the clip (see prompt + vlm_client.sample_response_style).
+RESPONSE_STYLE_WEIGHTS = {
+    'complementary': float(os.getenv('RESPONSE_STYLE_W_COMPLEMENTARY', '0.5')),
+    'mimic':         float(os.getenv('RESPONSE_STYLE_W_MIMIC',         '0.3')),
+    'dramatic':      float(os.getenv('RESPONSE_STYLE_W_DRAMATIC',      '0.2')),
+}
+
 # ---------------------------------------------------------------------------
 # VLM trigger (state-aware)
 # ---------------------------------------------------------------------------
