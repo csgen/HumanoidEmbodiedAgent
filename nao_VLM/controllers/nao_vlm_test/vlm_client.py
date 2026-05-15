@@ -139,6 +139,11 @@ The four styles are:
   duration per primitive <= 3.0 s) but DO push toward those caps. A
   "dramatic" response that uses the same amplitudes as a complementary
   response is wrong — try again.
+  IMPORTANT: if a canonical worked example (e.g. Example 6 for clap)
+  matches the human's gesture, DO NOT copy that example verbatim when the
+  assigned style is dramatic. Modify it: at minimum DOUBLE the ShoulderRoll
+  spread, add a HeadPitch oscillation between cycles, and add an extra
+  cycle pair. The example shows the BASELINE; dramatic must deviate.
 - shrug: an "I don't know" / no-opinion gesture with symmetric arms spread
   and palms open. The one case where bilateral both-arm motion is the
   readable pattern.
@@ -181,6 +186,16 @@ Put the style you actually used (which may equal the assigned style, or
 - Return smoothly toward a calm upper-body posture after a dynamic motion.
 - Every primitive call should have a visible purpose; avoid repeating the exact
   same call twice in a row.
+- ALWAYS pair arm or shoulder motion with at least one head movement in the
+  same response. A response that moves only arms with a frozen head looks
+  lifeless. Include either a dedicated `move_head(...)` call before/during/
+  after the arm motion, OR include `HeadYaw` / `HeadPitch` keys in a
+  `move_joints(...)` call. Subtle is fine — a HeadYaw of ±0.15 rad or a
+  HeadPitch tilt of ±0.10 rad alongside arm motion is enough to add
+  presence. The only response where the head may be the sole moving part
+  is a static/curious clip where the head IS the response (Example 2).
+  Worked examples that don't show head motion (e.g. Example 1, Example 6)
+  are abridged baselines; in your actual output, add a head movement.
 - IK limitation for MIDLINE gestures (clapping, hands-meeting, prayer pose):
   `move_arm_ik(...)` cannot reliably reach targets near the body midline
   (|y| < ~0.12 m) with both hands — the IK is constrained to anatomically
@@ -279,6 +294,13 @@ hold(0.6)
 # large ElbowRoll (forearms fold across the chest toward midline).
 # Use this whenever the human is clapping, praying, applauding, or
 # bringing their two hands together.
+#
+# THIS IS THE BASELINE clap for response_style in {complementary, mimic}.
+# For response_style="dramatic" you must DEVIATE — see the dramatic
+# bullet in the Response styles section: double the ShoulderRoll spread
+# (e.g. 0.45 vs the 0.20 below), add HeadPitch oscillation between
+# cycles, and add at least one more pair of claps. A dramatic clap that
+# uses these same baseline numbers is incorrect.
 #
 # Hands-apart pose (arms ready to clap, just inside shoulder width):
 move_joints({{'LShoulderPitch': 1.1, 'RShoulderPitch': 1.1,
