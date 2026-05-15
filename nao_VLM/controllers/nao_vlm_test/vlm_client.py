@@ -101,8 +101,8 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - For this project stage, DO NOT walk and DO NOT use locomotion.
 - Prefer upper-body behavior only: head, shoulders, elbows, wrists, hands.
 - Avoid lower-body joints unless absolutely necessary; in this stage they are not needed.
-- Keep motions short, smooth, physically plausible, and pet-like.
-- React naturally rather than mimic exactly; the response should feel socially appropriate.
+- Keep motions short, smooth, physically plausible, and socially appropriate.
+- React in a way that fits the clip: usually complementary, sometimes a deliberate mimic for playful moments, occasionally dramatic when the clip strongly invites it, and a clear shrug when the intent is genuinely ambiguous. See the *Response styles* section below.
 - Avoid exaggerated repeated oscillations unless the video strongly supports them.
 - Prefer nonverbal motion only in this demo stage.
 
@@ -165,14 +165,20 @@ Put the style you actually used (which may equal the assigned style, or
 - Return smoothly toward a calm upper-body posture after a dynamic motion.
 - Every primitive call should have a visible purpose; avoid repeating the exact
   same call twice in a row.
-- Avoid mirrored both-arm responses unless the frames clearly show a bilateral
-  interaction. Most natural pet-like responses use head plus one dominant arm.
+- Most responses use head plus one dominant arm. Bilateral both-arm motion is
+  reserved for two specific cases: shrug responses (always bilateral; see
+  Example 5) and explicit bilateral interactions (e.g. the human gestures
+  with both arms). Choose the dominant arm based on where the human's motion
+  is concentrated in the camera frame — left and right are equally valid;
+  do not default to the right arm.
 - If you use `move_joints(...)`, prefer coordinated shoulder/elbow/head changes
   that form a readable pose rather than tiny no-op joint changes.
 - A response that only returns one elbow to its mechanical limit is usually too
   generic unless the frames strongly justify it.
-- Avoid driving shoulder pitch, shoulder roll, elbow roll, or head pitch to the
-  exact joint extremes; leave visible comfort margin.
+- Avoid driving shoulder pitch, shoulder roll, or elbow roll to the exact
+  joint extremes; leave visible comfort margin. Head motions may use the
+  wider end of the head joint limits (HeadYaw up to ±1.3 rad, HeadPitch
+  within −0.4 to +0.4 rad) when the clip supports a deliberate attention cue.
 - For pet-like responses, prefer one readable gesture with a short settle rather
   than several large disjoint posture changes.
 
@@ -189,25 +195,58 @@ oscillate_joint('RElbowRoll', center=1.0, amplitude=0.5,
                 frequency=2.0, duration=1.5, decay=0.3)
 move_arm_ik('right', xyz=[0.02, -0.10, -0.20], duration=0.4)
 
-## Example 2 — motion_dynamics = "static" with curious affect
-# Small attentive head cue, brief settle. NO arms when the clip is just a
-# still pose — moving arms here would feel forced. The first move_head MUST
-# have a non-trivial yaw or pitch (>=0.10 rad in magnitude); a no-op
-# (yaw=0, pitch=0) is rejected by the safety validator and counted as a
-# fallback. Vary the angle direction with the human's apparent attention.
-move_head(yaw=0.18, pitch=-0.05, duration=0.4, trajectory='min_jerk')
-hold(0.6)
-move_head(yaw=-0.10, pitch=0.0, duration=0.4, trajectory='min_jerk')
+## Example 1L — same dynamics as Example 1 but lateralized to the LEFT arm
+# Pick this side when the human's active arm is in the right half of the
+# camera frame (the camera mirrors the human, so the human's left hand falls
+# in our right field; we respond on the same side of the frame — our left).
+# Note: LElbowRoll is negative by NAO convention (its valid range is roughly
+# [-1.54, -0.03], so the oscillation center is negative and the bounds stay
+# inside the limit). Left and right are equally valid; choose based on the
+# clip, not on habit.
+move_arm_ik('left', xyz=[0.15, 0.15, 0.10], duration=0.4)
+oscillate_joint('LElbowRoll', center=-1.0, amplitude=0.5,
+                frequency=2.0, duration=1.5, decay=0.3)
+move_arm_ik('left', xyz=[0.02, 0.10, -0.20], duration=0.4)
 
-## Example 3 — motion_dynamics = "approaching" with neutral/cautious affect
-# Lean upper body slightly back via shoulder pitch (NO lower-body joints) and
-# raise dominant hand in a soft "wait" posture. Use min_jerk for elegance.
-move_joints({{'LShoulderPitch': 1.6, 'RShoulderPitch': 1.6,
-             'HeadPitch': -0.05}},
+## Example 2 — motion_dynamics = "static" with curious affect
+# A clearly readable head turn, brief settle, then a smaller look-back. NO
+# arms when the clip is just a still pose — moving arms here would feel
+# forced. Head amplitudes here are deliberate and within the usable range;
+# a no-op (yaw=0 AND pitch=0) is rejected by the safety validator. Vary
+# the direction with the human's apparent attention.
+move_head(yaw=0.45, pitch=-0.25, duration=0.4, trajectory='min_jerk')
+hold(0.6)
+move_head(yaw=-0.30, pitch=0.10, duration=0.4, trajectory='min_jerk')
+
+## Example 3 — motion_dynamics = "approaching" with engaged/attentive affect
+# NAO has NO torso DoF, so a real body lean is not possible. We construct an
+# "engaged forward" cue from a deliberate head pitch DOWN (this is what the
+# camera actually reads as the lean) + a meaningful shoulder pitch change
+# that rotates both arms slightly forward + a raised dominant hand. The
+# head pitch leads the read; the shoulder change is secondary support.
+# Shoulder pitch delta is now visible (rest is ~1.5; we go to 0.7 ≈ 46°
+# forward) rather than the previous near-no-op nudge.
+move_joints({{'LShoulderPitch': 0.7, 'RShoulderPitch': 0.7,
+             'HeadPitch': 0.30}},
             duration=0.5, trajectory='min_jerk')
-move_arm_ik('right', xyz=[0.12, -0.10, 0.05], duration=0.4)
+move_arm_ik('right', xyz=[0.18, -0.12, 0.05], duration=0.4)
 set_hand('right', openness=0.7, duration=0.3)
 hold(0.5)
+
+## Example 5 — response_style = "shrug" for ambiguous intent / low confidence
+# Symmetric arm spread + palms open + small head tilt. This is the ONE case
+# where bilateral both-arm motion is the readable pattern. Use when
+# confidence < 0.4 or the human's intent is genuinely unclear from the
+# clip. ShoulderRoll signs follow NAO: +ve on L = arm out to the LEFT,
+# -ve on R = arm out to the RIGHT. ElbowRoll signs follow NAO anatomical
+# convention (L negative, R positive).
+move_joints({{'LShoulderRoll': 0.8, 'RShoulderRoll': -0.8,
+             'LElbowRoll': -0.4, 'RElbowRoll': 0.4,
+             'HeadPitch': -0.15}},
+            duration=0.5, trajectory='min_jerk')
+set_hand('left', openness=1.0, duration=0.3)
+set_hand('right', openness=1.0, duration=0.3)
+hold(0.6)
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
