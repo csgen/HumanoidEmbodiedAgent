@@ -253,13 +253,17 @@ class NaoVlmAPI:
         return state
 
     def _side_arm_joint_names(self, side: str) -> List[str]:
+        # WristYaw is intentionally excluded: it is a pure rotation about the
+        # wrist axis and contributes ~0 to the hand position objective, so the
+        # position-only DLS solver in move_arm_ik cannot drive it meaningfully
+        # but the integration step would still leave it at a random-walk value.
+        # The VLM can still command it directly via move_joint / oscillate_joint.
         prefix = 'L' if side == 'left' else 'R'
         return [
             f'{prefix}ShoulderPitch',
             f'{prefix}ShoulderRoll',
             f'{prefix}ElbowYaw',
             f'{prefix}ElbowRoll',
-            f'{prefix}WristYaw',
         ]
 
     def _joint_velocity_indices(self, joint_name: str) -> List[int]:
@@ -341,6 +345,17 @@ class NaoVlmAPI:
 
         frame_id = self.hand_frames[side]
         q = self.q_current.copy()
+
+        # Reset the wrist roll to neutral before the IK solve so any drift
+        # accumulated in q_current from previous primitives does not survive
+        # into the commanded readback. WristYaw is not in the IK chain (see
+        # _side_arm_joint_names), so the solver leaves this value alone.
+        wrist_name = f"{'L' if side == 'left' else 'R'}WristYaw"
+        if wrist_name in self.model.names:
+            wjid = self.model.getJointId(wrist_name)
+            wqi = self.model.joints[wjid].idx_q
+            q[wqi] = 0.0
+
         allowed_joint_names = [
             name for name in self._side_arm_joint_names(side)
             if name in self.motors and name in self.model.names
