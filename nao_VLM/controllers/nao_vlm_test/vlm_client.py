@@ -121,8 +121,24 @@ The four styles are:
   side of the camera frame as the human's active arm (the camera mirrors
   the human, so a wave with the human's right hand appears on the LEFT side
   of the frame and is mimicked with the robot's LEFT arm).
-- dramatic: a deliberately exaggerated or comic reaction. Stay within
-  validator caps (oscillation amplitude <= 0.7 rad, frequency <= 2.5 Hz).
+- dramatic: a deliberately EXAGGERATED or comic reaction. The motion must
+  look clearly bigger than a complementary response, not "just a bit more".
+  Concrete targets when picking parameters:
+    * oscillation amplitude near the cap: 0.55–0.7 rad (NOT 0.3).
+    * oscillation frequency near the cap: 2.0–2.5 Hz.
+    * head dynamics: add a deliberate head pitch or yaw of >= 0.30 rad in
+      a direction that amplifies the affect (e.g. head jerks back for
+      mock-surprise, head tilts sideways with eyes-up for mock-confusion).
+    * lengthen the sequence: include at least one extra primitive that a
+      complementary version would not have (e.g. a head reaction BEFORE
+      the arm reaction, or a recoil + recover pair).
+    * arm reach: use the larger end of plausible IK targets (e.g.
+      x in [0.18, 0.22], |y| in [0.18, 0.22]) so the arms are clearly
+      extended.
+  Stay within validator caps (amplitude <= 0.7 rad, frequency <= 2.5 Hz,
+  duration per primitive <= 3.0 s) but DO push toward those caps. A
+  "dramatic" response that uses the same amplitudes as a complementary
+  response is wrong — try again.
 - shrug: an "I don't know" / no-opinion gesture with symmetric arms spread
   and palms open. The one case where bilateral both-arm motion is the
   readable pattern.
@@ -165,6 +181,13 @@ Put the style you actually used (which may equal the assigned style, or
 - Return smoothly toward a calm upper-body posture after a dynamic motion.
 - Every primitive call should have a visible purpose; avoid repeating the exact
   same call twice in a row.
+- IK limitation for MIDLINE gestures (clapping, hands-meeting, prayer pose):
+  `move_arm_ik(...)` cannot reliably reach targets near the body midline
+  (|y| < ~0.12 m) with both hands — the IK is constrained to anatomically
+  natural elbow geometry and the forearms bend OUTWARD, not inward. For any
+  motion where the two hands need to touch or come close to each other at the
+  midline, use `move_joints(...)` with explicit ShoulderRoll + ElbowRoll
+  values instead of paired `move_arm_ik` calls. See Example 6.
 - Most responses use head plus one dominant arm. Bilateral both-arm motion is
   reserved for two specific cases: shrug responses (always bilateral; see
   Example 5) and explicit bilateral interactions (e.g. the human gestures
@@ -247,6 +270,34 @@ move_joints({{'LShoulderRoll': 0.8, 'RShoulderRoll': -0.8,
 set_hand('left', openness=1.0, duration=0.3)
 set_hand('right', openness=1.0, duration=0.3)
 hold(0.6)
+
+## Example 6 — bilateral CLAP / hands-meet-at-midline via move_joints
+# DO NOT use paired `move_arm_ik` calls with small |y| targets for this —
+# the IK keeps the elbows on the anatomical branch and the forearms bend
+# OUTWARD, so the hands end up wide apart. Instead, set the joints
+# directly. The trick is small ShoulderRoll (arms hang near body) +
+# large ElbowRoll (forearms fold across the chest toward midline).
+# Use this whenever the human is clapping, praying, applauding, or
+# bringing their two hands together.
+#
+# Hands-apart pose (arms ready to clap, just inside shoulder width):
+move_joints({{'LShoulderPitch': 1.1, 'RShoulderPitch': 1.1,
+             'LShoulderRoll': 0.20, 'RShoulderRoll': -0.20,
+             'LElbowYaw': -1.0, 'RElbowYaw': 1.0,
+             'LElbowRoll': -1.0, 'RElbowRoll': 1.0}},
+            duration=0.4, trajectory='min_jerk')
+# Hands-together pose (forearms folded across, hands meet near midline):
+move_joints({{'LShoulderRoll': 0.05, 'RShoulderRoll': -0.05,
+             'LElbowRoll': -1.5, 'RElbowRoll': 1.5}},
+            duration=0.25, trajectory='min_jerk')
+# Brief settle, then a second clap by reopening + closing again:
+hold(0.15)
+move_joints({{'LShoulderRoll': 0.20, 'RShoulderRoll': -0.20,
+             'LElbowRoll': -1.0, 'RElbowRoll': 1.0}},
+            duration=0.25, trajectory='min_jerk')
+move_joints({{'LShoulderRoll': 0.05, 'RShoulderRoll': -0.05,
+             'LElbowRoll': -1.5, 'RElbowRoll': 1.5}},
+            duration=0.25, trajectory='min_jerk')
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
