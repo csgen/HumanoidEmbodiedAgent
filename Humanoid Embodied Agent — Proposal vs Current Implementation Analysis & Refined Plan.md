@@ -4,7 +4,7 @@
 
 This project is a course group assignment for building a humanoid embodied agent. The original proposal (v2.1) planned a custom primitive-based URDF (9-DoF upper body + wheeled base) in Gazebo + ROS 2. However, the teammate responsible for URDF imported an open-source NAO H25 V5.0 model from the `ros-naoqi/nao_robot` package and runs it in Webots instead. This plan analyzes the gap, responds to the professor's feedback ("appears rule-based rather than true embodied intelligence"), and lays out a revised implementation path.
 
-> **Reading guide.** §1–§14 captures the analysis and per-phase plans we agreed on. §15 is the original Phase 3 + 4 plan. **§16 is a retrospective showing what is now done**; the Phase 3 + 4 work plus a cleanup iteration are merged on `main`. **§17 is the active forward plan for Phase 5** — that's where the next teammate should focus. §18 lists out-of-scope items.
+> **Reading guide.** §1–§14 captures the analysis and per-phase plans we agreed on. §15 is the original Phase 3 + 4 plan and §16 the retrospective for those phases. §17 is the original Phase 5 plan and **§18 is the Phase 5 retrospective showing what is now done** — Phase 5 is merged on `main` (commit `9951a80`). §19 lists out-of-scope items.
 
 ---
 
@@ -451,7 +451,7 @@ See §15 for the original plan and §16 for the as-shipped retrospective. Notabl
 - AST-based pre-flight validator with joint-limit, IK-radius, oscillation-parameter, and lower-body-forbidden checks.
 - Local VLM backend behind `VLM_BACKEND=local` switch (cloud is default).
 
-### Phase 5: Evaluation framework — **active forward plan, see §17**
+### Phase 5: Evaluation framework — ✅ done. See §17 for the original plan and §18 for the as-shipped retrospective.
 
 ### Phase 6: Stretch goals (deferred)
 Action preemption mechanism, MediaPipe keypoint overlay, naturalness-aware filtering refinements, possible local-VLM judge.
@@ -610,7 +610,9 @@ Running the controller with `debug_video_samples/` clips (`clap`, `thumbs_up`, e
 
 ---
 
-## 17. Phase 5 Implementation Plan — Forward, Active
+## 17. Phase 5 Implementation Plan — Original (historical reference)
+
+> This section was the original Phase 5 plan. The actual implementation is in §18. Kept here so the design intent stays visible.
 
 **Audience:** the teammate picking this up after the cleanup iteration. Everything in §16 is already on `main`; Phase 5 builds on top without modifying the existing modules' public APIs.
 
@@ -734,7 +736,109 @@ Per-scenario success criteria:
 
 ---
 
-## 18. Out of scope (deferred or future work)
+## 18. Phase 5 — Retrospective (DONE)
+
+This section documents what is now on `main` for Phase 5 (commit `9951a80 feat: phase5 evaluation framework (#10)`). **All items below are merged.** The next reader should not need to revisit §17 unless something here looks broken; §17 is preserved only as the design-intent record.
+
+### 18.1 Status of §17 line-items
+
+| §17 item | Final status | Where it lives |
+|---|---|---|
+| §17.2 `evaluation/__init__.py` | ✅ | `evaluation/__init__.py` (package marker) |
+| §17.2 `evaluation/scenarios.py` | ✅ | `ScenarioSpec` dataclass + `PILOT_SCENARIOS` (10 entries pointing at `debug_video_samples/`) + `CANONICAL_SCENARIOS` (8 placeholder entries pointing at `videos/scenario_*.mp4`). `get_scenarios()` filters out scenarios whose video file is missing, so canonical entries no-op until the clips are recorded. |
+| §17.2 `evaluation/run_benchmark.py` | ✅ (CLI surface differs slightly from §17.8 — see below) | Subprocess-launches Webots per scenario × round × method, parses each run's `result.json`, aggregates to `artifacts/eval/{run_group}.json` + `.csv` (+ `_report.md` when `--judge` is set). |
+| §17.2 `evaluation/metrics.py` | ✅ | `compute_jerk` (numpy gradient on joint time-series → `avg_abs_jerk`, `max_abs_jerk`, sample count), `compute_com_excursion` (XY/Z max displacement from origin), `sandbox_summary` (flags joint-limit / lower-body / forbidden-primitive violations), `compute_result_metrics` (orchestrates all three for offline aggregation). |
+| §17.2 `evaluation/judge.py` | ✅ | GPT-4o, two-image input (input frame + robot screenshot/contact sheet), JSON `{pass, rationale}`. Caching via `judge_cache.json` keyed on `scenario_id + method + code hash + file sizes`, per §17.5. |
+| §17.2 `evaluation/rule_baseline.py` | ✅ | `INTENT_TO_CODE` (12+ intent labels → fixed primitive code), `SCENARIO_TO_INTENT` lookup, `RuleBaselineClient` (intent-only GPT prompt with offline heuristic fallback when no API key). Plugged in via `EVAL_METHOD=rule_baseline` env var in the controller (`nao_vlm_test.py:1254-1259`). |
+| §17.2 `metrics_recorder.py` | ✅ | `nao_VLM/controllers/nao_vlm_test/metrics_recorder.py`. `MetricsRecorder.from_env()` activates only when `METRICS_RUN_ID` is set; otherwise no-op. Writes `joint_states.jsonl`, `sandbox_events.jsonl`, `result.json`, plus motion-frame screenshots and a final robot screenshot. |
+| §17.3 main-loop joint+CoM logging | ✅ | `_record_metrics_step()` called per step from the main loop (`nao_vlm_test.py:190`); CoM computed via `pinocchio.centerOfMass`. |
+| §17.3 sandbox event logging | ✅ | `SandboxExecutor._record_event()` at validate/exec boundaries (`sandbox_exec.py:90-103, 341-358`). |
+| §17.3 fallback stats dump | ✅ | `fallback.stats()` (already present from §16.3) is serialized into `result.json` on every oneshot exit path (timeout / exception / success) in `nao_vlm_test.py:1021, 1034, 1110`. |
+| §17.3 `result.json` on oneshot exit | ✅ | `MetricsRecorder.write_result()` (`metrics_recorder.py:180-197`). |
+| §17.4 rule-baseline pipeline | ✅ | Same FrameBuffer + sandbox + metrics; only the client class swaps. |
+| §17.5 VLM-as-Judge | ✅ | Two-image GPT-4o call with caching, as planned. |
+| §17.7 metric targets | ⚠️ partial | Smoke runs are consistent with the targets (see §18.5), but the full canonical-8 × 3-round × 2-method matrix that §17.7 envisions cannot run until the 8 scenario clips are recorded (§18.6). |
+| §17.8 CLI surface | ⚠️ shipped surface differs from §17.8 sample commands | See §18.2 "CLI flag delta" below. |
+
+### 18.2 Items that exceed or differ from §17
+
+CLI flag delta vs the §17.8 sample commands:
+
+- Added `--scenario-set {pilot,canonical,all}` so the pilot 10-clip dataset is selectable without listing IDs. **Pilot is the working benchmark today.**
+- Added `--method both` (alongside `cap` and `rule_baseline`) so a single command runs the side-by-side comparison.
+- Added `--judge` (separate switch), `--headless`, `--realtime`, `--timeout-s`, `--output-dir`.
+- Aggregate output is a single `artifacts/eval/{run_group}.json` + `.csv` (+ `_report.md` when `--judge`), not per-scenario files. Per-run JSONL artifacts still land under `artifacts/oneshot/<run_id>/`.
+
+Controller-side additions that go beyond §17.3's "small additions only":
+
+- **Timeline tracking** — stage-by-stage execution log with `elapsed_seconds`, emitted as `timeline.json` per run (`nao_vlm_test.py:941-945`).
+- **Contact-sheet generation** — input frames and robot motion stitched via `cv2` into single images for the judge call (`nao_vlm_test.py:782-832`).
+- **Demo summary image** — side-by-side input vs. robot response, useful for the final report (`nao_vlm_test.py:835-863`).
+- **Throttled motion-frame capture** — `MetricsRecorder.maybe_capture_motion_frame()` (`metrics_recorder.py:139-178`), capped by `MOTION_FRAME_INTERVAL_S` and `MOTION_FRAME_MAX`.
+- **`evaluation/RESULT_SCHEMA.md`** — ~288-line reference documenting the two-stage `result.json` contract (Stage 1 written by `MetricsRecorder`; Stage 2 augmented by `run_benchmark.py`).
+
+### 18.3 New config knobs and env-var contract
+
+All in `nao_VLM/controllers/nao_vlm_test/config.py`:
+
+- `METRICS_RUN_ID` (`:75`) — empty by default; **single switch** that activates all controller-side metric writes. When unset, the controller behaves exactly as in Phase 4.
+- `METRICS_OUTPUT_DIR` (`:76`) — override for output location; defaults to `artifacts/oneshot/{run_id}`.
+- `EVAL_SCENARIO_ID` (`:77`) — written into `result.json`; the harness sets it per run.
+- `EVAL_METHOD` (`:78`) — `cap` (default) or `rule_baseline`. When `rule_baseline`, the controller loads `evaluation.rule_baseline.RuleBaselineClient` in place of `VLMClient`.
+- `MOTION_FRAME_INTERVAL_S` (`:70`) — throttle for motion-frame capture (default 0.4 s).
+- `MOTION_FRAME_MAX` (`:71`) — cap on motion frames per run (default 8).
+
+### 18.4 Test coverage
+
+`tests/test_phase5_evaluation.py` (7 tests, all offline / no Webots needed):
+
+1. `test_pilot_scenarios_exist` — pilot scenarios load and reference real files under `debug_video_samples/`.
+2. `test_metric_functions_on_synthetic_log` — `compute_jerk` and `compute_com_excursion` against synthetic joint logs.
+3. `test_rule_baseline_mapping` — scenario → intent → primitive-code pipeline integrity.
+4. `test_sandbox_event_logging` — integration with `SandboxExecutor`; events written to JSONL.
+5. `test_compute_result_metrics_from_files` — end-to-end metrics on JSONL inputs; checks `execution_success`, `safety_adherence`.
+6. `test_motion_frame_capture_throttling` — `MetricsRecorder.maybe_capture_motion_frame()` honors the interval + cap.
+7. `test_missing_artifact_paths_are_empty_logs` — graceful handling of missing per-run artifact paths.
+
+### 18.5 Empirical observations from smoke tests
+
+From AGENTS.md and `pilot_waving` smoke runs:
+
+- **CaP vs rule-baseline on `pilot_waving`:** average absolute jerk ≈ **1.23 (CaP)** vs ≈ **2.21 (rule_baseline)** — CaP currently produces smoother motion than the fixed-code baseline on this scenario.
+- Validator + sandbox flow records `validate_pass` + `exec_ok` events cleanly; no spurious safety failures on pilot clips.
+- `MetricsRecorder` correctly no-ops when `METRICS_RUN_ID` is unset, so non-evaluation runs (e.g. live demos) incur zero logging overhead.
+- The headline §17.7 target — **CaP beats rule-baseline by ≥ 10 percentage points on VLM-as-Judge appropriateness** — is **still pending** the canonical-8 runs. Smoke runs are encouraging but not statistically meaningful with the pilot dataset alone.
+
+### 18.6 Remaining for Phase 5 closure
+
+**Canonical 8 scenario videos still need to be recorded** by the team. The slots are already registered in `evaluation/scenarios.py` under `CANONICAL_SCENARIOS`, pointing at:
+
+```
+videos/scenario_01_wave.mp4
+videos/scenario_02_cross_arms.mp4
+videos/scenario_03_lean_forward.mp4
+videos/scenario_04_walk_away.mp4
+videos/scenario_05_crouch.mp4
+videos/scenario_06_reject.mp4
+videos/scenario_07_handshake.mp4
+videos/scenario_08_idle.mp4
+```
+
+`get_scenarios()` filters missing files, so the canonical set silently no-ops until the clips land. Once recorded (5–10 s per §10.5), `--scenario-set canonical` immediately becomes runnable — no code change required.
+
+Evaluation result artifacts (`artifacts/eval/...`, `artifacts/oneshot/...`) are intentionally **not part of repo state**: `artifacts/` is gitignored (`.gitignore:160`). They are regenerated per benchmark run.
+
+### 18.7 Decisions still in effect
+
+- **`--scenario-set pilot` is the default working benchmark** until the canonical 8 are recorded. The pilot 10 cover ~5 of the 8 canonical intents and add 5 extras useful for diversity testing.
+- **`VLM_BACKEND=openai` is mandatory for benchmark runs.** `auto` is a footgun on small VMs (it falls back to `local` and downloads a multi-GB model when no API key is configured); the inheritance from §16.5 still holds.
+- **`result.json` is the cross-stage contract.** Stage 1 is written by `MetricsRecorder` inside Webots; Stage 2 is augmented by `run_benchmark.py` post-run. See `evaluation/RESULT_SCHEMA.md` for the canonical field list.
+- **`METRICS_RUN_ID` is the single activation switch** for all controller-side metric writes. The controller is functionally unchanged when it's unset.
+- **No public-API changes** were made to `vlm_client.py`, `frame_buffer.py`, `idle_animator.py`, `vlm_trigger.py`, or `fallback.py` (the `fallback.stats()` surface added during cleanup §16.3 was already there).
+
+---
+
+## 19. Out of scope (deferred or future work)
 
 - **Pinocchio self-collision check** (still deferred from §15.E). Revisit only if Phase 5 evaluation reveals self-collisions.
 - **Phase 6 stretches**: action preemption, MediaPipe keypoint overlay, naturalness-aware filtering refinement (already partially implemented for local-VLM path), local-VLM judge.
