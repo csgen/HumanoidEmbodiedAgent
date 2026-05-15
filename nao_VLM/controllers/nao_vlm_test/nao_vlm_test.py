@@ -356,6 +356,20 @@ class NaoVlmAPI:
             wqi = self.model.joints[wjid].idx_q
             q[wqi] = 0.0
 
+        # Seed ElbowYaw to its anatomically-natural branch before the IK solve.
+        # NAO's ElbowYaw has ~±2.09 rad range and exposes a redundant rotational
+        # DoF the human elbow lacks, so the position-only IK admits two valid
+        # solutions per target: forearm natural (~+1.2 on R, ~-1.2 on L) and
+        # forearm flipped 180° around the upper arm (opposite sign). The solver
+        # converges to whichever branch is closer to the seed. By overriding the
+        # seed to NEUTRAL_POSE the solver is locked onto the natural branch and
+        # cannot drift across the zero barrier during the 30 damped steps.
+        elbow_yaw_name = f"{'L' if side == 'left' else 'R'}ElbowYaw"
+        if elbow_yaw_name in self.model.names:
+            ejid = self.model.getJointId(elbow_yaw_name)
+            eqi = self.model.joints[ejid].idx_q
+            q[eqi] = config.NEUTRAL_POSE.get(elbow_yaw_name, q[eqi])
+
         allowed_joint_names = [
             name for name in self._side_arm_joint_names(side)
             if name in self.motors and name in self.model.names
