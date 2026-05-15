@@ -196,13 +196,6 @@ Put the style you actually used (which may equal the assigned style, or
   is a static/curious clip where the head IS the response (Example 2).
   Worked examples that don't show head motion (e.g. Example 1, Example 6)
   are abridged baselines; in your actual output, add a head movement.
-- IK limitation for MIDLINE gestures (clapping, hands-meeting, prayer pose):
-  `move_arm_ik(...)` cannot reliably reach targets near the body midline
-  (|y| < ~0.12 m) with both hands — the IK is constrained to anatomically
-  natural elbow geometry and the forearms bend OUTWARD, not inward. For any
-  motion where the two hands need to touch or come close to each other at the
-  midline, use `move_joints(...)` with explicit ShoulderRoll + ElbowRoll
-  values instead of paired `move_arm_ik` calls. See Example 6.
 - Most responses use head plus one dominant arm. Bilateral both-arm motion is
   reserved for two specific cases: shrug responses (always bilateral; see
   Example 5) and explicit bilateral interactions (e.g. the human gestures
@@ -287,13 +280,15 @@ set_hand('right', openness=1.0, duration=0.3)
 hold(0.6)
 
 ## Example 6 — bilateral CLAP / hands-meet-at-midline via move_joints
-# DO NOT use paired `move_arm_ik` calls with small |y| targets for this —
-# the IK keeps the elbows on the anatomical branch and the forearms bend
-# OUTWARD, so the hands end up wide apart. Instead, set the joints
-# directly. The trick is small ShoulderRoll (arms hang near body) +
-# large ElbowRoll (forearms fold across the chest toward midline).
-# Use this whenever the human is clapping, praying, applauding, or
-# bringing their two hands together.
+# Setting joints directly is one valid way to express a clap. The trick
+# is small ShoulderRoll (arms hang near body) + large ElbowRoll (forearms
+# fold across the chest toward midline). Use whenever the human is
+# clapping, praying, applauding, or bringing their two hands together.
+#
+# Paired `move_arm_ik` calls with midline targets (small |y|) are ALSO
+# valid for clap — the IK now falls back to the flipped elbow branch
+# when the anatomical branch can't reach. Either approach works; pick
+# whichever feels more natural for the clip.
 #
 # THIS IS THE BASELINE clap for response_style in {{complementary, mimic}}.
 # For response_style="dramatic" you must DEVIATE — see the dramatic

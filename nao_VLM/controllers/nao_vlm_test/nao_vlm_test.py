@@ -333,61 +333,45 @@ class NaoVlmAPI:
                 return 'ABORTED'
         return f'OK move_joints n={len(segments)}'
 
-    def move_arm_ik(self, side: str, xyz, duration: float,
-                    orientation=None) -> str:
-        side = self._normalize_arm_side(side)
-        if side not in ('left', 'right'):
-            return f'ERROR: invalid side {side!r}'
-        try:
-            target_pos = np.asarray(xyz, dtype=float).reshape(3)
-        except Exception:
-            return f'ERROR: xyz must be a 3-vector, got {xyz!r}'
+    def _solve_arm_ik_branch(self, side: str, target_pos: np.ndarray,
+                              frame_id: int, elbow_yaw_seed: float):
+        """Run 30-iter damped-least-squares IK from q_current with a specific
+        ElbowYaw seed (which selects the elbow branch).
 
-        frame_id = self.hand_frames[side]
+        Returns (q_final, reached_bool, residual_err_m, allowed_joint_names).
+        WristYaw is always seeded to 0.0 (it is not in the IK chain).
+        """
         q = self.q_current.copy()
 
-        # Reset the wrist roll to neutral before the IK solve so any drift
-        # accumulated in q_current from previous primitives does not survive
-        # into the commanded readback. WristYaw is not in the IK chain (see
-        # _side_arm_joint_names), so the solver leaves this value alone.
         wrist_name = f"{'L' if side == 'left' else 'R'}WristYaw"
         if wrist_name in self.model.names:
             wjid = self.model.getJointId(wrist_name)
             wqi = self.model.joints[wjid].idx_q
             q[wqi] = 0.0
 
-        # Seed ElbowYaw to its anatomically-natural branch before the IK solve.
-        # NAO's ElbowYaw has ~±2.09 rad range and exposes a redundant rotational
-        # DoF the human elbow lacks, so the position-only IK admits two valid
-        # solutions per target: forearm natural (~+1.2 on R, ~-1.2 on L) and
-        # forearm flipped 180° around the upper arm (opposite sign). The solver
-        # converges to whichever branch is closer to the seed. By overriding the
-        # seed to NEUTRAL_POSE the solver is locked onto the natural branch and
-        # cannot drift across the zero barrier during the 30 damped steps.
         elbow_yaw_name = f"{'L' if side == 'left' else 'R'}ElbowYaw"
         if elbow_yaw_name in self.model.names:
             ejid = self.model.getJointId(elbow_yaw_name)
             eqi = self.model.joints[ejid].idx_q
-            q[eqi] = config.NEUTRAL_POSE.get(elbow_yaw_name, q[eqi])
+            q[eqi] = float(elbow_yaw_seed)
 
         allowed_joint_names = [
             name for name in self._side_arm_joint_names(side)
             if name in self.motors and name in self.model.names
         ]
-        if not allowed_joint_names:
-            return f'ERROR: no controllable arm joints for side={side!r}'
         allowed_velocity_indices = []
         for joint_name in allowed_joint_names:
             allowed_velocity_indices.extend(self._joint_velocity_indices(joint_name))
 
-        # IK: only allow the selected arm chain to move.
         reached = False
+        final_err = float('inf')
         for _ in range(30):
             pin.forwardKinematics(self.model, self.data, q)
             pin.updateFramePlacements(self.model, self.data)
             cur = self.data.oMf[frame_id].translation
-            err = target_pos - cur
-            if np.linalg.norm(err) < 0.005:
+            err_vec = target_pos - cur
+            final_err = float(np.linalg.norm(err_vec))
+            if final_err < 0.005:
                 reached = True
                 break
             J = pin.computeFrameJacobian(
@@ -400,23 +384,78 @@ class NaoVlmAPI:
             J[:, ~enabled] = 0.0
             damping = 1e-4
             JJt = J @ J.T + damping * np.eye(J.shape[0])
-            dq = J.T @ np.linalg.solve(JJt, err)
+            dq = J.T @ np.linalg.solve(JJt, err_vec)
             q = pin.integrate(self.model, q, dq * 0.5)
+
+        # Re-evaluate residual error after the loop (covers both the iter-cap
+        # case and the converged case where final_err was last computed before
+        # the break).
+        pin.forwardKinematics(self.model, self.data, q)
+        pin.updateFramePlacements(self.model, self.data)
+        final_err = float(np.linalg.norm(target_pos - self.data.oMf[frame_id].translation))
+
+        return q, reached, final_err, allowed_joint_names
+
+    def move_arm_ik(self, side: str, xyz, duration: float,
+                    orientation=None) -> str:
+        side = self._normalize_arm_side(side)
+        if side not in ('left', 'right'):
+            return f'ERROR: invalid side {side!r}'
+        try:
+            target_pos = np.asarray(xyz, dtype=float).reshape(3)
+        except Exception:
+            return f'ERROR: xyz must be a 3-vector, got {xyz!r}'
+
+        frame_id = self.hand_frames[side]
+        elbow_yaw_name = f"{'L' if side == 'left' else 'R'}ElbowYaw"
+        natural_seed = float(config.NEUTRAL_POSE.get(elbow_yaw_name, 0.0))
+
+        # First attempt: anatomical elbow branch (preferred — looks natural,
+        # no forearm flip). Locks the solver to RElbowYaw ≈ +1.2 / LElbowYaw
+        # ≈ -1.2 territory; for most in-front-of-body targets the anatomical
+        # solve converges within 0.005 m.
+        q_nat, reached_nat, err_nat, allowed_joints = self._solve_arm_ik_branch(
+            side, target_pos, frame_id, natural_seed,
+        )
+
+        q_chosen = q_nat
+        reached_chosen = reached_nat
+        branch_used = 'anatomical'
+
+        # Fallback: if the anatomical branch missed by >3 cm, try the flipped
+        # branch. This restores reach for cross-body / midline / face-touch
+        # targets that the anatomical elbow cannot fold inward to reach
+        # (e.g. clap, hand-to-chin, prayer pose). The flipped branch admits
+        # the forearm-rotated-180° configuration that satisfies these
+        # targets. We accept it only when it is meaningfully better
+        # (>0.005 m closer) than the anatomical residual, so borderline
+        # targets stay anatomical and look natural.
+        if not reached_nat and err_nat > 0.03:
+            q_flip, reached_flip, err_flip, _ = self._solve_arm_ik_branch(
+                side, target_pos, frame_id, -natural_seed,
+            )
+            if err_flip < err_nat - 0.005:
+                q_chosen = q_flip
+                reached_chosen = reached_flip
+                branch_used = 'flipped'
+
+        if not allowed_joints:
+            return f'ERROR: no controllable arm joints for side={side!r}'
 
         # Extract target angles only for the selected arm so IK never drags
         # unrelated joints into the motion.
         target_angles = {}
-        for motor_name in allowed_joint_names:
+        for motor_name in allowed_joints:
             if motor_name in self.model.names and motor_name in self.motors:
                 jid = self.model.getJointId(motor_name)
                 qi = self.model.joints[jid].idx_q
-                target_angles[motor_name] = float(q[qi])
+                target_angles[motor_name] = float(q_chosen[qi])
         if not target_angles:
             return 'ERROR: no motors match IK solution'
 
         result = self.move_joints(target_angles, duration, trajectory='cubic')
-        suffix = 'converged' if reached else 'not-converged'
-        return f'{result} ({suffix})'
+        status = 'converged' if reached_chosen else 'not-converged'
+        return f'{result} ({status} via {branch_used})'
 
     def oscillate_joint(self, name: str, center: float, amplitude: float,
                         frequency: float, duration: float,
