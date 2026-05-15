@@ -295,7 +295,7 @@ hold(0.6)
 # Use this whenever the human is clapping, praying, applauding, or
 # bringing their two hands together.
 #
-# THIS IS THE BASELINE clap for response_style in {complementary, mimic}.
+# THIS IS THE BASELINE clap for response_style in {{complementary, mimic}}.
 # For response_style="dramatic" you must DEVIATE — see the dramatic
 # bullet in the Response styles section: double the ShoulderRoll spread
 # (e.g. 0.45 vs the 0.20 below), add HeadPitch oscillation between
