@@ -125,6 +125,7 @@ NEUTRAL_POSE = {
     'RShoulderPitch': 1.5, 'RShoulderRoll': -0.15,
     'RElbowYaw': 1.2, 'RElbowRoll': 0.5, 'RWristYaw': 0.0,
 }
+NEUTRAL_HAND_OPENNESS = float(os.getenv('NEUTRAL_HAND_OPENNESS', '0.25'))
 
 # ---------------------------------------------------------------------------
 # URDF path resolution

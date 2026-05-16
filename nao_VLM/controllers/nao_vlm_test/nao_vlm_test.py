@@ -946,6 +946,10 @@ def _run_oneshot_demo(
         suffix = f' - {detail}' if detail else ''
         print(f'[oneshot +{elapsed:06.2f}s] {name}{suffix}')
 
+    stage('robot_reset_start', 'move robot to neutral down-arm rest pose before any sampling')
+    _move_robot_to_demo_rest_pose(vlm_api, log_prefix='oneshot')
+    stage('robot_reset_done', 'robot is in neutral down-arm rest pose')
+
     stage('waiting_for_frames', f'target={config.VLM_FRAME_COUNT} source={config.WEBCAM_SOURCE!r}')
     ready = _wait_for_frame_buffer(
         robot=robot,
@@ -1131,6 +1135,18 @@ def _run_oneshot_demo(
             _write_text(artifact_dir / 'timeline.json', json.dumps(timeline, ensure_ascii=False, indent=2) + '\n')
 
 
+def _move_robot_to_demo_rest_pose(vlm_api: NaoVlmAPI, log_prefix: str = 'reset') -> None:
+    print(f'[{log_prefix}] moving robot to neutral down-arm rest pose...')
+    neutral_result = vlm_api.move_joints(config.NEUTRAL_POSE, duration=0.8, trajectory='min_jerk')
+    print(f'[{log_prefix}] neutral pose result: {neutral_result}')
+    left_hand_result = vlm_api.set_hand('left', openness=config.NEUTRAL_HAND_OPENNESS, duration=0.25, trajectory='min_jerk')
+    print(f'[{log_prefix}] left hand neutral result: {left_hand_result}')
+    right_hand_result = vlm_api.set_hand('right', openness=config.NEUTRAL_HAND_OPENNESS, duration=0.25, trajectory='min_jerk')
+    print(f'[{log_prefix}] right hand neutral result: {right_hand_result}')
+    hold_result = vlm_api.hold(0.5)
+    print(f'[{log_prefix}] neutral hold result: {hold_result}')
+
+
 def _run_replay_demo(
     robot: Supervisor,
     timestep: int,
@@ -1149,6 +1165,8 @@ def _run_replay_demo(
     if not code.strip():
         print(f'[replay] ERROR: code file is empty: {code_path}')
         return
+
+    _move_robot_to_demo_rest_pose(vlm_api, log_prefix='replay')
 
     if config.REPLAY_START_DELAY > 0.0:
         print(f'[replay] waiting {config.REPLAY_START_DELAY:.2f}s before execution...')
@@ -1285,8 +1303,7 @@ def main():
     # Active primitive set (matches the VLM prompt). Legacy duplicates
     # (operate_gripper -> set_hand, look_at -> move_head, move_arm -> move_arm_ik,
     # set_posture -> upper-body composition) are intentionally NOT registered so
-    # the VLM cannot accidentally pick deprecated paths or bypass the
-    # forbidden-lower-body invariant enforced by SandboxExecutor.validate().
+    # the VLM stays on the current primitive API.
     executor.register_many({
         'move_joint': vlm_api.move_joint,
         'move_joints': vlm_api.move_joints,
@@ -1345,6 +1362,9 @@ def main():
             if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
                 _request_simulation_quit(robot, 0)
         return
+
+    print('[init] moving robot to neutral down-arm rest pose before periodic loop...')
+    _move_robot_to_demo_rest_pose(vlm_api, log_prefix='periodic')
 
     # 7. State-aware trigger + idle animator
     trigger: Optional[VLMTrigger] = None

@@ -3,7 +3,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="${REPO_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+DEFAULT_CONDA_PY="/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/python"
 CONDA_PY="${CONDA_PY:-python3}"
+if [[ "$CONDA_PY" == "python3" && -x "$DEFAULT_CONDA_PY" ]]; then
+  CONDA_PY="$DEFAULT_CONDA_PY"
+fi
 PRECOMPUTE_PY="$REPO_DIR/scripts/precompute_vlm_code_from_video.py"
 LAUNCH_SCRIPT="$REPO_DIR/scripts/launch_side_by_side_demo.sh"
 RECORD_PY="$REPO_DIR/scripts/screen_record_region.py"
@@ -16,6 +20,10 @@ WORK_DIR="${WORK_DIR:-$REPO_DIR/artifacts/precomputed_demo}"
 VLM_FRAME_COUNT_VALUE="${VLM_FRAME_COUNT:-4}"
 VLM_MAX_TOKENS_VALUE="${VLM_MAX_TOKENS:-320}"
 REPLAY_CODE_OVERRIDE="${REPLAY_CODE_PATH:-}"
+DEMO_WORKSPACE_INDEX="${DEMO_WORKSPACE_INDEX:-1}"
+ONE_SHOT_POST_EXECUTION_SECONDS_VALUE="${ONE_SHOT_POST_EXECUTION_SECONDS:-6}"
+RECORD_SECONDS="${RECORD_SECONDS:-20}"
+REPLAY_START_DELAY_VALUE="${REPLAY_START_DELAY:-4}"
 
 mkdir -p "$WORK_DIR"
 mkdir -p "$(dirname "$OUT_MP4")"
@@ -23,6 +31,7 @@ mkdir -p "$(dirname "$OUT_MP4")"
 STEM="$(basename "${VIDEO_PATH%.*}")"
 CODE_DIR="$WORK_DIR/$STEM"
 CODE_PATH="$CODE_DIR/python_code.py"
+VIDEO_TITLE_VALUE="Demo-$STEM"
 
 DISPLAY=:0 bash "$PREVENT_SLEEP_SCRIPT" >/tmp/prevent_display_sleep.log 2>&1 &
 SLEEP_PID=$!
@@ -62,24 +71,32 @@ WEBOTS_GEOM="0,$((MARGIN_X * 2 + LEFT_WIDTH)),${MARGIN_TOP},${RIGHT_WIDTH},${USA
 
 DEMO_MODE=replay \
 REPLAY_CODE_PATH="$CODE_PATH" \
-REPLAY_START_DELAY=3 \
-VIDEO_TITLE="Demo-$STEM" \
+REPLAY_START_DELAY="$REPLAY_START_DELAY_VALUE" \
+ONE_SHOT_POST_EXECUTION_SECONDS="$ONE_SHOT_POST_EXECUTION_SECONDS_VALUE" \
+ONE_SHOT_EXIT_AFTER_EXECUTE=0 \
+DEMO_WORKSPACE_INDEX="$DEMO_WORKSPACE_INDEX" \
+VIDEO_TITLE="$VIDEO_TITLE_VALUE" \
 VIDEO_GEOM="$VIDEO_GEOM" \
 WEBOTS_GEOM="$WEBOTS_GEOM" \
+RAISE_DEMO_WINDOWS=1 \
 bash "$LAUNCH_SCRIPT" "$VIDEO_PATH" >/tmp/${STEM}_launch.log 2>&1 &
 LAUNCH_PID=$!
 
 sleep 2
+
+/home/darian/miniconda3/envs/humanoid_robot_vlm_darian/bin/wmctrl -s "$DEMO_WORKSPACE_INDEX" >/dev/null 2>&1 || true
 
 DISPLAY=:0 "$CONDA_PY" "$RECORD_PY" \
   --x 0 \
   --y 0 \
   --width "$WIDTH" \
   --height "$HEIGHT" \
-  --seconds 18 \
+  --seconds "$RECORD_SECONDS" \
   --fps 25 \
   --output "$OUT_MP4"
 
+pkill -f "webots.*nao_VLM.wbt" 2>/dev/null || true
+pkill -f "ffplay.*$VIDEO_TITLE_VALUE" 2>/dev/null || true
 wait "$LAUNCH_PID" || true
 
 echo "[Complete] [完成] $OUT_MP4"

@@ -97,9 +97,6 @@ or "greet()" function. You must COMPOSE motion from these primitives:
     idle(duration: float)
 
 # Demo constraints
-- For this project stage, DO NOT walk and DO NOT use locomotion.
-- Prefer upper-body behavior only: head, shoulders, elbows, wrists, hands.
-- Avoid lower-body joints unless absolutely necessary; in this stage they are not needed.
 - Keep motions short, smooth, physically plausible, and pet-like.
 - React naturally rather than mimic exactly; the response should feel socially appropriate.
 - Avoid exaggerated repeated oscillations unless the video strongly supports them.
@@ -146,10 +143,68 @@ or "greet()" function. You must COMPOSE motion from these primitives:
   that form a readable pose rather than tiny no-op joint changes.
 - A response that only returns one elbow to its mechanical limit is usually too
   generic unless the frames strongly justify it.
-- Avoid driving shoulder pitch, shoulder roll, elbow roll, or head pitch to the
-  exact joint extremes; leave visible comfort margin.
 - For pet-like responses, prefer one readable gesture with a short settle rather
   than several large disjoint posture changes.
+
+# Expressivity budget
+- The response should visibly read from a distance; avoid collapsing every clip
+  into a minimal head twitch.
+- Current tuning target: ERR ON THE SIDE OF STRONGER EXPRESSION for
+  medium/high energy clips. In this tuning phase, it is BETTER to be slightly
+  too large (while still smooth and safe) than too small to read.
+- For medium/high energy clips, BIAS TOWARD LARGER SAFE MOTION. If choosing
+  between a tiny ambiguous response and a larger but still smooth/safe response,
+  choose the larger readable one.
+- Match expressivity to the observed motion energy:
+  - low energy clip -> subtle but readable head-led or single-arm cue
+  - medium energy clip -> readable preparation + CLEAR main gesture + short settle
+  - high energy clip -> one clearly visible upper-body response with stronger
+    shoulder/elbow involvement, while staying smooth and controlled
+- For medium/high energy clips, it is GOOD to use 3-6 primitive calls if that
+  makes the intent more legible.
+- For medium/high energy clips, prefer the UPPER HALF of the safe motion range
+  for the dominant arm posture rather than conservative near-neutral values.
+- A good aggressive-but-safe main gesture often means:
+  - arm target clearly above neutral, around x≈0.17-0.24, |y|≈0.16-0.24, z≈0.10-0.18
+  - shoulder roll / elbow roll visibly engaged, not barely perturbed
+  - a clear raised-arm silhouette that reads instantly
+- For medium/high energy clips, the main gesture should usually contain a
+  clearly visible shoulder/elbow posture change before any wrist or hand detail.
+- High-energy clips should look expressive from across the room: raise the
+  dominant arm clearly away from neutral instead of only adding a tiny wrist
+  accent or head twitch.
+- For greeting-like clips, the dominant arm should form a clearly readable
+  upward diagonal about 45 degrees above the ground, rather than a flat forward
+  reach.
+- For greeting-like clips, the raised hand/forearm should present upward into
+  space, not hang downward toward the floor. The greeting arm should look like
+  an upward salute/wave, not a dangling or downward-facing limb.
+- For greeting-like clips, the MAIN greeting pose should keep the hand visibly
+  ABOVE the elbow and the elbow visibly ABOVE the resting hand level, so the
+  whole silhouette reads as an upward greeting rather than a forward poke or a
+  limp arm.
+- If the frames show repeated hand/arm motion across multiple images, prefer a
+  clear arm raise followed by one short elbow or wrist oscillation on the
+  dominant side. A hand-open-only response is usually too weak.
+- For waving-like or greeting-like clips, if you use `set_hand(...)`, a single
+  static hand opening is usually too weak. Prefer at least TWO distinct hand
+  states in sequence, such as more open -> less open, so the hand motion is
+  visibly readable.
+- On medium/high energy clips, the MAIN expressive posture should stay visibly
+  away from neutral/rest. Do not immediately cancel a strong arm raise by
+  moving the shoulder/elbow back near a resting pose unless you are clearly in
+  the final settle phase.
+- Prefer a simple 3-phase structure when possible:
+  1. preparation / orient
+  2. main expressive gesture
+  3. settle / hold / return toward calm
+- Use larger shoulder/elbow posture changes before wrist/hand detail when the
+  clip contains clear human motion. Distal-only motion is usually too weak.
+- Do NOT be timid on medium/high energy clips: avoid responses that only lift
+  the hand slightly, only twitch the head, or only open the hand unless the
+  clip itself is weak.
+- During this tuning round, avoid conservative "demo-safe" under-reaction.
+  The gesture should look obviously intentional even without zooming in.
 
 # Concrete examples (treat as templates, NOT recipes to copy)
 
@@ -158,11 +213,16 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 # clip you observe (amplitude, duration, side, joint set).
 
 ## Example 1 — motion_dynamics = "oscillatory" (e.g. greeting wave back)
-# Lift right arm, oscillate the elbow with light decay, return to rest.
-move_arm_ik('right', xyz=[0.15, -0.15, 0.10], duration=0.4)
-oscillate_joint('RElbowRoll', center=1.0, amplitude=0.5,
-                frequency=2.0, duration=1.5, decay=0.3)
-move_arm_ik('right', xyz=[0.02, -0.10, -0.20], duration=0.4)
+# Lift the arm clearly into an UPWARD 45° greeting silhouette, keep the main
+# pose readable, oscillate the elbow, then settle. This should read as a real
+# visible response, not a tiny accent.
+move_head(yaw=-0.10, pitch=-0.04, duration=0.22, trajectory='min_jerk')
+move_arm_ik('right', xyz=[0.20, -0.18, 0.14], duration=0.45)
+move_joints({{'RShoulderPitch': 0.78, 'RShoulderRoll': -0.48,
+             'RElbowRoll': 1.10}}, duration=0.35, trajectory='min_jerk')
+oscillate_joint('RElbowRoll', center=1.10, amplitude=0.45,
+                frequency=2.1, duration=1.2, decay=0.18)
+hold(0.30)
 
 ## Example 2 — motion_dynamics = "static" with curious affect
 # Small attentive head cue, brief settle. NO arms when the clip is just a
@@ -175,7 +235,7 @@ hold(0.6)
 move_head(yaw=-0.10, pitch=0.0, duration=0.4, trajectory='min_jerk')
 
 ## Example 3 — motion_dynamics = "approaching" with neutral/cautious affect
-# Lean upper body slightly back via shoulder pitch (NO lower-body joints) and
+# Lean upper body slightly back via shoulder pitch and
 # raise dominant hand in a soft "wait" posture. Use min_jerk for elegance.
 move_joints({{'LShoulderPitch': 1.6, 'RShoulderPitch': 1.6,
              'HeadPitch': -0.05}},
@@ -183,6 +243,32 @@ move_joints({{'LShoulderPitch': 1.6, 'RShoulderPitch': 1.6,
 move_arm_ik('right', xyz=[0.12, -0.10, 0.05], duration=0.4)
 set_hand('right', openness=0.7, duration=0.3)
 hold(0.5)
+
+## Example 4 — motion_dynamics = "raising" with warm/high-energy affect
+# A more expressive but still smooth response: orient, raise one arm visibly,
+# add a short wrist/hand accent, then settle.
+move_head(yaw=-0.12, pitch=-0.04, duration=0.25, trajectory='min_jerk')
+move_arm_ik('right', xyz=[0.22, -0.20, 0.16], duration=0.45)
+move_joints({{'RShoulderPitch': 0.80, 'RShoulderRoll': -0.46,
+             'RElbowRoll': 1.02}}, duration=0.35, trajectory='min_jerk')
+set_hand('right', openness=0.8, duration=0.25)
+oscillate_joint('RWristYaw', center=0.18, amplitude=0.34,
+                frequency=1.5, duration=0.8, decay=0.30)
+hold(0.35)
+
+## Example 5 — bold single-arm readable reply for a waving-like clip
+# Use a clearly visible diagonal right-arm lift of about 35°-55° above the
+# ground. The greeting hand should stay visually above the elbow line and
+# point upward into space, not sag downward. Keep the main pose away from
+# neutral, and animate the hand with visible open-close motion. A static open
+# hand is too weak.
+move_head(yaw=0.08, pitch=-0.04, duration=0.20, trajectory='min_jerk')
+move_arm_ik('right', xyz=[0.20, -0.18, 0.14], duration=0.45)
+move_joints({{'RShoulderPitch': 0.82, 'RShoulderRoll': -0.42,
+             'RElbowRoll': 1.00}}, duration=0.35, trajectory='min_jerk')
+set_hand('right', openness=0.95, duration=0.20)
+set_hand('right', openness=0.45, duration=0.20)
+hold(0.35)
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
@@ -233,13 +319,23 @@ _LOCAL_USER_PROMPT = (
     "primitives and joint movements. Use the exact primitive names provided in "
     "the system instructions. Do not prefix calls with objects like `nao.` or "
     "`robot.`. Output only the required fenced JSON block and fenced Python "
-    "block. Do not use lower-body motion or walking in this demo stage. Prefer "
-    "head, arm, wrist, and hand motion only. Do not default to the same motion "
+    "block. Do not default to the same motion "
     "pattern for every clip. Infer laterality, tempo, activity level, and "
     "dominant direction from the frames, then let those observations change the "
     "generated control program. If the visible motion is lateralized, prefer one "
     "dominant arm or a head-led response, and keep the opposite arm mostly quiet "
-    "unless the frames clearly justify bilateral motion."
+    "unless the frames clearly justify bilateral motion. For medium/high energy "
+    "clips, prefer a larger still-safe upper-body gesture with clearly visible "
+    "shoulder/elbow displacement over a tiny cautious response. Keep the main "
+    "gesture visibly away from neutral instead of raising the arm and then "
+    "immediately returning it to a near-rest posture. For greeting-like clips, "
+    "the dominant arm should rise diagonally about 45 degrees upward relative "
+    "to the ground, and the raised forearm/hand should face upward into space "
+    "rather than droop toward the floor. In the main greeting pose, the hand "
+    "should remain visibly above the elbow/rest line so the silhouette reads as "
+    "upward. For waving-like clips, a single static "
+    "hand opening is too weak; if using `set_hand(...)`, prefer at least two "
+    "distinct hand states in sequence."
 )
 
 _LOCAL_REPAIR_PROMPT_TEMPLATE = """The previous robot-control program was not acceptable.
@@ -251,9 +347,21 @@ Rules:
 - Do not use any intermediate gesture labels.
 - Do not use canned named actions.
 - Use only these primitives: move_joint, move_joints, move_arm_ik, move_head, set_hand, oscillate_joint, hold, idle.
-- Do NOT use lower-body joints.
 - Prefer smooth upper-body motion only: head, shoulders, elbows, wrists, hands.
 - Keep the motion short, natural, pet-like, and physically plausible.
+- For medium/high energy clips, prefer larger readable motion instead of timid
+  tiny adjustments, while staying smooth and within safety limits.
+- In this tuning round, err toward larger safe amplitude rather than caution.
+- For medium/high energy clips, use the upper half of the safe arm-motion range
+  unless the frames clearly suggest restraint.
+- For greeting-like clips, the dominant arm should rise diagonally about 45
+  degrees upward relative to the ground.
+- For greeting-like clips, the lifted forearm/hand should look upward and
+  elevated, not drooping downward toward the floor.
+- For greeting-like clips, the main raised pose should keep the hand visually
+  above the elbow/rest line so the arm reads upward instead of limp or flat.
+- For waving-like clips, if using `set_hand(...)`, prefer at least two distinct
+  hand states in sequence rather than one static hand opening.
 - Use exact primitive names with no object prefixes.
 
 Previous semantic JSON:
@@ -278,11 +386,31 @@ Rules:
 - Keep the robot fully controlled by VLM-generated code.
 - Do not use intermediate gesture labels or canned named actions.
 - Use only these primitives: move_joint, move_joints, move_arm_ik, move_head, set_hand, oscillate_joint, hold, idle.
-- Do NOT use lower-body joints.
 - The new code must differ materially from the previous code if the previous code was too generic.
 - Avoid a wrist-only oscillation unless the video truly supports it.
 - Prefer a short coordinated combination such as head+arm, head+hand, or arm+hand over a single-joint response when the frames support it.
 - If the clip evidence is weak, stay small and calm rather than inventing a dramatic response.
+- If the clip evidence is medium/high energy, do the opposite: avoid timid
+  under-reaction and prefer a clearly legible upper-body gesture with visible
+  shoulder/elbow movement.
+- In this tuning round, deliberately bias toward a bolder response: if one
+  candidate is merely adequate and another is clearly larger while still safe,
+  choose the larger one.
+- For greeting-like clips, prefer an upward diagonal dominant-arm greeting pose
+  of about 45 degrees relative to the ground.
+- For greeting-like clips, reject poses where the greeting arm appears to droop
+  downward instead of presenting upward into space.
+- For greeting-like clips, reject poses whose main raised hand still sits near
+  elbow height or below, because that reads as flat or drooping instead of an
+  upward greeting.
+- If the clip shows repeated arm motion across frames, prefer a readable arm
+  raise plus a short elbow/wrist oscillation instead of only opening the hand.
+- For waving-like or greeting-like clips, if using `set_hand(...)`, a single
+  hand state is too weak in this tuning phase; prefer at least two distinct
+  hand states in sequence.
+- For medium/high energy clips, avoid repaired code that raises an arm first
+  and then immediately overwrites that pose with near-neutral shoulder/elbow
+  targets before the gesture can read clearly.
 - For low-motion or static clips, avoid zero-angle no-op poses; use a small readable head attention cue instead.
 - Do not repeat the exact same primitive call twice in a row.
 - Avoid symmetric both-arm poses unless the video clearly supports bilateral motion.
@@ -291,6 +419,15 @@ Rules:
 - Avoid joint-extreme postures that look tense or mechanically forced.
 - For low-motion or static clips, prefer head-only attention cues; avoid inventing arm poses unless the frames clearly justify them.
 - End the response with a short `hold(...)` or `idle(...)` after the main motion so the behavior settles naturally.
+- For medium/high energy clips, the main gesture should be visibly larger than
+  a hand-open-only cue or a tiny head twitch.
+- For medium/high energy clips, do not choose candidates whose largest arm
+  posture still stays close to the robot's neutral resting pose.
+- If the observed motion itself is repeated across frames, hand-open-only or
+  head-only responses are too weak; prefer one short visible oscillatory accent
+  on the dominant arm.
+- For medium/high energy clips in this tuning phase, favor a clearly bolder
+  dominant-arm silhouette before later fine-tuning it downward if needed.
 
 Previous semantic JSON:
 {semantic_json}
@@ -311,13 +448,27 @@ _LOCAL_SELECTION_PROMPT_TEMPLATE = """You must choose the BEST candidate robot r
 Selection rules:
 - Choose the candidate that is most grounded in the actual video frames.
 - Prefer the candidate that feels most natural, short, smooth, and pet-like.
-- Prefer upper-body only behavior.
+- For medium/high energy clips, prefer the candidate whose main gesture is more
+  visibly readable at a distance, as long as it remains smooth and safe.
+- Prefer candidates whose dominant-arm shoulder/elbow posture clearly departs
+  from rest during the main gesture, not candidates that only add a hand cue
+  after a weak arm lift.
+- During this tuning phase, break ties in favor of the larger safe candidate,
+  not the conservative one.
+- If the clip contains repeated arm motion, prefer candidates that preserve a
+  readable raised-arm posture and add a short elbow/wrist oscillation over
+  candidates that only open the hand.
+- For waving-like clips, prefer candidates that use two distinct hand states
+  over candidates with only one static hand opening.
+- For greeting-like clips, prefer candidates whose raised hand clearly sits in
+  an upward 45-degree silhouette instead of a flat or downward-facing arm.
 - Reject candidates that look generic, repetitive, or unrelated to the observed motion.
-- Reject candidates that use walking, lower-body joints, or obviously unsafe motion.
 - If more than one candidate is plausible, choose the one with the clearest social appropriateness.
 - Reject candidates that repeat the exact same call twice in a row.
 - Reject candidates that move both arms symmetrically without clear evidence.
 - Reject candidates whose motion is technically valid but visually unreadable or no-op.
+- Reject candidates that under-react to a medium/high energy clip by producing
+  only tiny head, wrist, or hand motion.
 - If the motion evidence is laterally asymmetric, prefer candidates with one
   dominant arm instead of bilateral responses.
 - Reject candidates that add non-dominant-arm support poses without clear evidence.
@@ -866,6 +1017,9 @@ def _has_hand_without_postural_anchor(code: str) -> bool:
         if fn_name == 'move_arm_ik':
             has_shoulder_or_ik = True
             continue
+        if fn_name == 'move_head':
+            has_head = True
+            continue
         if fn_name == 'set_hand':
             has_hand = True
             continue
@@ -895,6 +1049,8 @@ def _has_hand_without_postural_anchor(code: str) -> bool:
 def _has_readable_head_or_single_arm_focus(code: str) -> bool:
     calls = _parse_top_level_calls(code)
     for call in calls:
+        if call.get('name') == 'move_head':
+            return True
         if call.get('name') == 'move_arm_ik':
             return True
         if call.get('name') not in {'move_joint', 'move_joints'}:
@@ -920,6 +1076,59 @@ def _has_readable_head_or_single_arm_focus(code: str) -> bool:
         if right_count >= 2 and left_count == 0:
             return True
     return False
+
+
+def _has_visible_dynamic_structure(summary: Dict[str, Any], code: str) -> bool:
+    activity = str((summary or {}).get('activity_level') or 'low').lower()
+    if activity not in {'medium', 'high'}:
+        return True
+
+    lines = _non_comment_code_lines(code)
+    calls = _parse_top_level_calls(code)
+    if not calls:
+        return False
+
+    fn_names = [call.get('name') for call in calls]
+    move_arm_count = fn_names.count('move_arm_ik')
+    move_joint_count = fn_names.count('move_joint') + fn_names.count('move_joints')
+    head_move_count = fn_names.count('move_head')
+    hand_count = fn_names.count('set_hand')
+    oscillation_count = fn_names.count('oscillate_joint')
+    has_settle = calls[-1].get('name') in {'hold', 'idle'}
+
+    minimum_lines = 4 if activity == 'high' else 3
+    if len(lines) < minimum_lines:
+        return False
+    if not has_settle:
+        return False
+
+    readable_anchor_count = 0
+    if move_arm_count >= 1:
+        readable_anchor_count += 1
+    if move_joint_count >= 1:
+        readable_anchor_count += 1
+    if head_move_count >= 1:
+        readable_anchor_count += 1
+    if oscillation_count >= 1:
+        readable_anchor_count += 1
+
+    if activity == 'high':
+        if readable_anchor_count < 2:
+            return False
+        if (
+            oscillation_count == 0
+            and move_arm_count < 2
+            and not (
+                move_arm_count >= 1
+                and (move_joint_count >= 1 or head_move_count >= 1 or hand_count >= 1)
+            )
+        ):
+            return False
+    else:
+        if readable_anchor_count < 1:
+            return False
+
+    return True
 
 
 def _upper_body_activity_stats(code: str) -> Dict[str, int]:
@@ -960,6 +1169,9 @@ def _upper_body_activity_stats(code: str) -> Dict[str, int]:
             elif side == 'right':
                 stats['right_score'] += 1
                 stats['right_calls'] += 1
+            continue
+        elif fn_name == 'move_head':
+            stats['head_calls'] += 1
             continue
         else:
             continue
@@ -1028,6 +1240,99 @@ def _dominant_arm_side_in_code(code: str) -> Optional[str]:
     return 'balanced'
 
 
+def _semantic_text_blob(semantic: Dict[str, Any]) -> str:
+    if not isinstance(semantic, dict):
+        return ''
+    parts = []
+    for key in ('intent', 'robot_intent', 'motion_dynamics', 'affect'):
+        value = semantic.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip().lower())
+    return ' | '.join(parts)
+
+
+def _semantic_looks_greeting_like(semantic: Dict[str, Any]) -> bool:
+    text = _semantic_text_blob(semantic)
+    if not text:
+        return False
+    tokens = (
+        'greet', 'greeting', 'wave', 'waving', 'hello', 'hi',
+        'salute', 'welcome',
+    )
+    return any(token in text for token in tokens)
+
+
+def _has_two_distinct_hand_states(code: str) -> bool:
+    calls = _parse_top_level_calls(code)
+    hand_states: List[Tuple[str, float]] = []
+    for call in calls:
+        if call.get('name') != 'set_hand':
+            continue
+        side = _normalize_arm_side_token(call['args'][0] if call['args'] else call['kwargs'].get('side'))
+        openness = call['args'][1] if len(call.get('args') or []) >= 2 else call.get('kwargs', {}).get('openness')
+        if side in {'left', 'right'} and isinstance(openness, (int, float)):
+            hand_states.append((side, round(float(openness), 3)))
+    if len(hand_states) < 2:
+        return False
+    for (side_a, open_a), (side_b, open_b) in zip(hand_states, hand_states[1:]):
+        if side_a == side_b and abs(open_a - open_b) >= 0.12:
+            return True
+    return False
+
+
+def _greeting_pose_penalty(semantic: Dict[str, Any], code: str) -> float:
+    if not _semantic_looks_greeting_like(semantic):
+        return 0.0
+
+    penalty = 0.0
+    calls = _parse_top_level_calls(code)
+    dominant_side = _dominant_arm_side_in_code(code)
+    if dominant_side not in {'left', 'right'}:
+        penalty += 2.0
+
+    has_upward_anchor = False
+    has_shoulder_pose = False
+    for call in calls:
+        fn_name = call.get('name')
+        if fn_name == 'move_arm_ik':
+            side = _normalize_arm_side_token(call['args'][0] if call['args'] else call['kwargs'].get('side'))
+            xyz = call['args'][1] if len(call.get('args') or []) >= 2 else call.get('kwargs', {}).get('xyz')
+            if side == dominant_side and isinstance(xyz, (list, tuple)) and len(xyz) == 3:
+                try:
+                    x_val, _, z_val = [float(v) for v in xyz]
+                except Exception:
+                    continue
+                if x_val >= 0.14 and z_val >= 0.08:
+                    has_upward_anchor = True
+        elif fn_name == 'move_joints':
+            joint_angles = call['args'][0] if call['args'] else call['kwargs'].get('joint_angles')
+            if not isinstance(joint_angles, dict):
+                continue
+            shoulder_pitch_name = f'{dominant_side[:1].upper()}ShoulderPitch' if dominant_side in {'left', 'right'} else None
+            shoulder_roll_name = f'{dominant_side[:1].upper()}ShoulderRoll' if dominant_side in {'left', 'right'} else None
+            elbow_roll_name = f'{dominant_side[:1].upper()}ElbowRoll' if dominant_side in {'left', 'right'} else None
+            sp = joint_angles.get(shoulder_pitch_name) if shoulder_pitch_name else None
+            sr = joint_angles.get(shoulder_roll_name) if shoulder_roll_name else None
+            er = joint_angles.get(elbow_roll_name) if elbow_roll_name else None
+            if isinstance(sp, (int, float)) and isinstance(sr, (int, float)):
+                if dominant_side == 'right':
+                    has_shoulder_pose = float(sp) <= 1.10 and float(sr) <= -0.20
+                else:
+                    has_shoulder_pose = float(sp) <= 1.10 and float(sr) >= 0.20
+                if isinstance(er, (int, float)) and abs(float(er)) >= 0.65:
+                    has_shoulder_pose = has_shoulder_pose and True
+
+    if not has_upward_anchor:
+        penalty += 3.0
+    if not has_shoulder_pose:
+        penalty += 2.0
+    if 'set_hand(' in code and not _has_two_distinct_hand_states(code):
+        penalty += 2.0
+    if 'hold(' not in code and 'idle(' not in code:
+        penalty += 0.8
+    return penalty
+
+
 def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any], code: str) -> bool:
     if not code:
         return True
@@ -1051,7 +1356,7 @@ def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any
         return True
     if _has_symmetric_dual_arm_ik(code):
         return True
-    if activity in {'low', 'medium'} and _has_mirrored_dual_arm_posture(code):
+    if activity == 'low' and _has_mirrored_dual_arm_posture(code):
         return True
     if _has_fragmented_bilateral_upper_body_motion(code):
         return True
@@ -1067,15 +1372,17 @@ def _looks_too_generic_for_clip(summary: Dict[str, Any], semantic: Dict[str, Any
         return True
     if activity in {'medium', 'high'} and 'move_arm_ik' not in unique_fns and 'move_joints' not in unique_fns:
         return True
-    if activity in {'medium', 'high'} and not _has_readable_head_or_single_arm_focus(code):
+    if activity == 'high' and not _has_readable_head_or_single_arm_focus(code):
         return True
-    if active_side in {'left_image', 'right_image'} and dominant_arm == 'balanced':
+    if activity in {'medium', 'high'} and not _has_visible_dynamic_structure(summary, code):
         return True
-    if active_side == 'left_image' and dominant_arm == 'right':
+    if activity == 'low' and active_side in {'left_image', 'right_image'} and dominant_arm == 'balanced':
         return True
-    if active_side == 'right_image' and dominant_arm == 'left':
+    if activity == 'low' and active_side == 'left_image' and dominant_arm == 'right':
         return True
-    if _has_non_dominant_arm_noise(summary, code):
+    if activity == 'low' and active_side == 'right_image' and dominant_arm == 'left':
+        return True
+    if activity == 'low' and _has_non_dominant_arm_noise(summary, code):
         return True
     if _has_no_settle_after_dynamic_motion(summary, code):
         return True
@@ -1094,7 +1401,7 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
     active_side = str((summary or {}).get('active_side') or 'balanced').lower()
     dominant_arm = _dominant_arm_side_in_code(code)
 
-    if len(lines) > 8:
+    if len(lines) > 10:
         penalty += 4.0
     if len(lines) <= 1:
         penalty += 5.0
@@ -1110,15 +1417,15 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
     move_joint_count = fn_names.count('move_joint') + fn_names.count('move_joints')
     hand_count = fn_names.count('set_hand')
 
-    if oscillation_count >= 3:
+    if oscillation_count >= 4:
         penalty += 2.5
     if oscillation_count >= 1 and move_arm_count == 0 and move_joint_count == 0:
         penalty += 3.0
-    if move_arm_count >= 4:
+    if move_arm_count >= 5:
         penalty += 2.0
     if _has_symmetric_dual_arm_ik(code):
         penalty += 4.0
-    if _has_mirrored_dual_arm_posture(code):
+    if activity == 'low' and _has_mirrored_dual_arm_posture(code):
         penalty += 3.0
     if _has_fragmented_bilateral_upper_body_motion(code):
         penalty += 4.0
@@ -1132,25 +1439,34 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
         penalty += 3.0
     if _has_static_clip_with_arm_motion(summary, code):
         penalty += 4.0
-    if activity in {'medium', 'high'} and not _has_readable_head_or_single_arm_focus(code):
+    if activity == 'high' and not _has_readable_head_or_single_arm_focus(code):
         penalty += 2.5
-    if active_side in {'left_image', 'right_image'} and dominant_arm == 'balanced':
+    if activity in {'medium', 'high'} and not _has_visible_dynamic_structure(summary, code):
+        penalty += 4.0 if activity == 'high' else 2.5
+    if activity == 'low' and active_side in {'left_image', 'right_image'} and dominant_arm == 'balanced':
         penalty += 3.0
-    if active_side == 'left_image' and dominant_arm == 'right':
+    if activity == 'low' and active_side == 'left_image' and dominant_arm == 'right':
         penalty += 2.5
-    if active_side == 'right_image' and dominant_arm == 'left':
+    if activity == 'low' and active_side == 'right_image' and dominant_arm == 'left':
         penalty += 2.5
-    if _has_non_dominant_arm_noise(summary, code):
+    if activity == 'low' and _has_non_dominant_arm_noise(summary, code):
         penalty += 3.0
     if _has_no_settle_after_dynamic_motion(summary, code):
         penalty += 1.5
-    if hand_count >= 4:
+    if hand_count >= 5:
         penalty += 1.5
 
     if activity in {'medium', 'high'} and move_arm_count == 0 and move_joint_count == 0:
         penalty += 3.0
-    if activity == 'low' and oscillation_count >= 2:
+    if activity == 'low' and oscillation_count >= 3:
         penalty += 2.0
+
+    if activity in {'medium', 'high'} and 3 <= len(lines) <= 6:
+        penalty -= 0.75
+    if activity == 'high' and move_arm_count >= 2 and ('hold' in unique_fns or 'idle' in unique_fns):
+        penalty -= 0.5
+    if activity in {'medium', 'high'} and move_joint_count >= 1 and move_arm_count >= 1:
+        penalty -= 0.5
 
     if 'set_hand(' in code and 'move_arm_ik(' not in code and 'move_joints(' not in code:
         penalty += 2.5
@@ -1159,7 +1475,7 @@ def _naturalness_penalty(summary: Dict[str, Any], code: str) -> float:
 
 
 def _candidate_quality(summary: Dict[str, Any], semantic: Dict[str, Any], code: str, validation_ok: bool) -> Tuple[float, int, float]:
-    penalty = _naturalness_penalty(summary, code)
+    penalty = _naturalness_penalty(summary, code) + _greeting_pose_penalty(semantic, code)
     generic_flag = 1 if _looks_too_generic_for_clip(summary, semantic, code) else 0
     validation_flag = 0 if validation_ok else 1
     return (penalty + generic_flag * 2.0 + validation_flag * 1000.0, generic_flag, penalty)
@@ -1227,6 +1543,8 @@ def _describe_code_quality_issue(summary: Dict[str, Any], semantic: Dict[str, An
         reasons.append('the clip is nearly static, but the generated response still moves an arm or hand instead of staying mostly head-led and calm')
     if _has_no_settle_after_dynamic_motion(summary, code):
         reasons.append('the code lacks a short settle at the end, so the response looks abrupt')
+    if not _has_visible_dynamic_structure(summary, code):
+        reasons.append('the visible motion energy is medium/high, but the response lacks a clear preparation-main-settle structure or enough readable upper-body motion')
 
     calls = _parse_code_calls(code)
     fn_names = [name for name, _ in calls]
@@ -1579,15 +1897,6 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
             ''.join(ch for ch in name if ch.isalnum()).lower(): name
             for name in self.joint_limits
         }
-        self.comfort_ratios = {
-            'HeadPitch': 0.78,
-            'LShoulderPitch': 0.82,
-            'RShoulderPitch': 0.82,
-            'LShoulderRoll': 0.84,
-            'RShoulderRoll': 0.84,
-            'LElbowRoll': 0.86,
-            'RElbowRoll': 0.86,
-        }
 
     def _literal(self, node):
         try:
@@ -1628,41 +1937,13 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
         return raw_name
 
     def _clip_joint_angle(self, joint_name: Any, angle: Any) -> Any:
-        if not isinstance(joint_name, str) or not isinstance(angle, (int, float)):
-            return angle
-        limits = self.joint_limits.get(joint_name)
-        if limits is None or limits[0] == limits[1]:
-            return angle
-        lo, hi = float(limits[0]), float(limits[1])
-        target = float(angle)
-        ratio = self.comfort_ratios.get(joint_name)
-        if ratio is not None:
-            center = 0.5 * (lo + hi)
-            half = 0.5 * (hi - lo) * float(ratio)
-            lo = center - half
-            hi = center + half
-        return float(max(lo, min(hi, target)))
+        return angle
 
     def _sanitize_oscillation(self, joint_name: Any, center: Any, amplitude: Any):
-        if not isinstance(joint_name, str) or not isinstance(center, (int, float)) or not isinstance(amplitude, (int, float)):
-            return center, amplitude
-        limits = self.joint_limits.get(joint_name)
-        if limits is None or limits[0] == limits[1]:
-            return center, amplitude
-        max_amp = max(0.0, min(abs(float(amplitude)), 0.7, (limits[1] - limits[0]) * 0.45))
-        min_center = limits[0] + max_amp
-        max_center = limits[1] - max_amp
-        if min_center > max_center:
-            mid = 0.5 * (limits[0] + limits[1])
-            return mid, 0.0
-        safe_center = float(max(min_center, min(max_center, float(center))))
-        signed_amp = max_amp if float(amplitude) >= 0 else -max_amp
-        return safe_center, signed_amp
+        return center, amplitude
 
     def _sanitize_hand_openness(self, openness: Any) -> Any:
-        if not isinstance(openness, (int, float)):
-            return openness
-        return float(max(0.0, min(1.0, float(openness))))
+        return openness
 
     def _normalize_arm_side(self, side: Any) -> Any:
         if not isinstance(side, str):
@@ -1681,18 +1962,7 @@ class _GeneratedCodeSanitizer(ast.NodeTransformer):
         return alias_map.get(normalized, side)
 
     def _sanitize_arm_target(self, side: Any, xyz: Any):
-        side = self._normalize_arm_side(side)
-        if not isinstance(side, str) or not isinstance(xyz, (list, tuple)) or len(xyz) != 3:
-            return xyz
-        try:
-            x, y, z = [float(v) for v in xyz]
-        except Exception:
-            return xyz
-        x = max(0.06, min(0.20, x))
-        lateral = max(0.06, min(0.18, abs(y)))
-        y = lateral if side == 'left' else -lateral
-        z = max(-0.16, min(0.13, z))
-        return [round(x, 4), round(y, 4), round(z, 4)]
+        return xyz
 
     def visit_Call(self, node: ast.Call):
         self.generic_visit(node)
@@ -2100,7 +2370,9 @@ class VLMClient:
                     if repaired_quality[1] == 1 or repaired_quality[0] >= 4.0:
                         second_prompt = parse_repair_prompt + (
                             "\n\nMake the response more readable and clip-specific: choose one dominant arm or head-led posture, "
-                            "avoid mirrored both-arm motion, and keep 2-4 primitive calls."
+                            "avoid mirrored both-arm motion, and keep 2-4 primitive calls. If the clip energy is medium/high, "
+                            "increase the visible shoulder/elbow amplitude so the motion reads clearly from a distance. "
+                            "For this tuning round, prefer a bolder safe arm silhouette instead of a cautious one."
                         )
                         second_semantic, second_code, second_raw, second_valid, second_quality = _pick_best_generated_variant(
                             processor, model, kind, images, self.system_prompt, second_prompt,
@@ -2158,7 +2430,7 @@ class VLMClient:
 
             if best_code and (
                 _looks_too_generic_for_clip(summary, best_semantic, best_code)
-                or _naturalness_penalty(summary, best_code) >= 3.0
+                or _naturalness_penalty(summary, best_code) >= 4.5
             ):
                 quality_issue = _describe_code_quality_issue(summary, best_semantic, best_code)
                 refinement_prompt = _build_refinement_prompt_with_summary(
@@ -2184,8 +2456,11 @@ class VLMClient:
                     best_quality = refined_quality
                 elif best_quality[1] == 1 or best_quality[0] >= 4.0:
                     second_prompt = refinement_prompt + (
-                        "\n\nTry a more readable pet-like response: use one dominant arm and/or head orientation, "
-                        "avoid bilateral mirroring, make the intent visible in 2-4 primitive calls, and finish with a short hold or idle."
+                        "\n\nTry a more readable and more expressive pet-like response: use a visible preparation, "
+                        "one clear main gesture, and a short settle. For medium/high energy clips, 3-6 primitive calls "
+                        "are acceptable. Keep the motion smooth, upper-body-only, and clip-specific. Bias toward a "
+                        "larger safe shoulder/elbow gesture instead of a timid tiny reaction. In this tuning round, "
+                        "deliberately choose the larger safe option first."
                     )
                     second_semantic, second_code, second_raw, second_valid, second_quality = _pick_best_generated_variant(
                         processor, model, kind, images, self.system_prompt, second_prompt,
