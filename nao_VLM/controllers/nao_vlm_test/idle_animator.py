@@ -80,6 +80,16 @@ class IdleAnimator:
             # phase gives a natural mild sway.
             'LShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(0.80 * t),
             'RShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(0.80 * t + math.pi),
+            # Step 6 Part D: tiny bilateral knee bounce ~3° peak, paired in
+            # phase (symmetric squat). Center 0.10 rad is the typical NAO
+            # H25 standing knee bend. Ankles move in counter-phase to keep
+            # the feet flat, which keeps the CoM roughly over the feet so
+            # the robot does not topple from the knee motion. If the robot
+            # ever loses balance, comment out these four lines.
+            'LKneePitch':  lambda t: 0.10 + 0.05 * math.sin(0.50 * t),
+            'RKneePitch':  lambda t: 0.10 + 0.05 * math.sin(0.50 * t),
+            'LAnklePitch': lambda t: -0.05 - 0.025 * math.sin(0.50 * t),
+            'RAnklePitch': lambda t: -0.05 - 0.025 * math.sin(0.50 * t),
         }
         self._overlay_joints: Set[str] = set(self._formulas.keys())
 
