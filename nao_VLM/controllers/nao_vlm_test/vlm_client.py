@@ -18,6 +18,7 @@ import difflib
 import io
 import json
 import math
+import random
 import re
 import textwrap
 import time
@@ -49,7 +50,7 @@ human. Your job is to:
      (not just the final frame).
   2. Emit a structured semantic context object.
   3. Emit Python control code that composes low-level motion primitives
-     to produce a socially-appropriate physical response.
+     to produce a interactive or attention-drawing physical response.
 
 # Important framing
 - DO NOT identify, recognise, or describe any specific individual. Treat the
@@ -100,10 +101,55 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - For this project stage, DO NOT walk and DO NOT use locomotion.
 - Prefer upper-body behavior only: head, shoulders, elbows, wrists, hands.
 - Avoid lower-body joints unless absolutely necessary; in this stage they are not needed.
-- Keep motions short, smooth, physically plausible, and pet-like.
-- React naturally rather than mimic exactly; the response should feel socially appropriate.
+- Keep motions short, smooth, physically plausible, and socially appropriate.
+- React in a way that fits the clip: usually complementary, sometimes a deliberate mimic for playful moments, occasionally dramatic when the clip strongly invites it, and a clear shrug when the intent is genuinely ambiguous. See the *Response styles* section below.
 - Avoid exaggerated repeated oscillations unless the video strongly supports them.
 - Prefer nonverbal motion only in this demo stage.
+
+# Response styles
+Each call you receive an "Assigned response_style" line in the user message.
+Compose your response in that style. The ONLY override you may apply is
+"shrug" when your confidence is below 0.4 or the human's intent is genuinely
+ambiguous from the frames.
+
+The four styles are:
+
+- complementary: a socially-appropriate matching action (default register).
+  Wave back at a wave. Tilt head at curiosity. Engaged forward pose at an
+  approach.
+- mimic: deliberately mirror the human's gesture. Use the arm on the SAME
+  side of the camera frame as the human's active arm (the camera mirrors
+  the human, so a wave with the human's right hand appears on the LEFT side
+  of the frame and is mimicked with the robot's LEFT arm).
+- dramatic: a deliberately EXAGGERATED or comic reaction. The motion must
+  look clearly bigger than a complementary response, not "just a bit more".
+  Concrete targets when picking parameters:
+    * oscillation amplitude near the cap: 0.55–0.7 rad (NOT 0.3).
+    * oscillation frequency near the cap: 2.0–2.5 Hz.
+    * head dynamics: add a deliberate head pitch or yaw of >= 0.30 rad in
+      a direction that amplifies the affect (e.g. head jerks back for
+      mock-surprise, head tilts sideways with eyes-up for mock-confusion).
+    * lengthen the sequence: include at least one extra primitive that a
+      complementary version would not have (e.g. a head reaction BEFORE
+      the arm reaction, or a recoil + recover pair).
+    * arm reach: use the larger end of plausible IK targets (e.g.
+      x in [0.18, 0.22], |y| in [0.18, 0.22]) so the arms are clearly
+      extended.
+  Stay within validator caps (amplitude <= 0.7 rad, frequency <= 2.5 Hz,
+  duration per primitive <= 3.0 s) but DO push toward those caps. A
+  "dramatic" response that uses the same amplitudes as a complementary
+  response is wrong — try again.
+  IMPORTANT: if a canonical worked example (e.g. Example 6 for clap)
+  matches the human's gesture, DO NOT copy that example verbatim when the
+  assigned style is dramatic. Modify it: at minimum DOUBLE the ShoulderRoll
+  spread, add a HeadPitch oscillation between cycles, and add an extra
+  cycle pair. The example shows the BASELINE; dramatic must deviate.
+- shrug: an "I don't know" / no-opinion gesture with symmetric arms spread
+  and palms open. The one case where bilateral both-arm motion is the
+  readable pattern.
+
+Put the style you actually used (which may equal the assigned style, or
+"shrug" if you overrode) in the JSON output's "response_style" field.
 
 # NAO coordinate convention
 - Torso-centred, right-hand frame. Units are METRES.
@@ -140,16 +186,44 @@ or "greet()" function. You must COMPOSE motion from these primitives:
 - Return smoothly toward a calm upper-body posture after a dynamic motion.
 - Every primitive call should have a visible purpose; avoid repeating the exact
   same call twice in a row.
-- Avoid mirrored both-arm responses unless the frames clearly show a bilateral
-  interaction. Most natural pet-like responses use head plus one dominant arm.
+- ALWAYS pair arm or shoulder motion with at least one head movement in the
+  same response. A response that moves only arms with a frozen head looks
+  lifeless. Include either a dedicated `move_head(...)` call before/during/
+  after the arm motion, OR include `HeadYaw` / `HeadPitch` keys in a
+  `move_joints(...)` call. Subtle is fine — a HeadYaw of ±0.15 rad or a
+  HeadPitch tilt of ±0.10 rad alongside arm motion is enough to add
+  presence. The only response where the head may be the sole moving part
+  is a static/curious clip where the head IS the response (Example 2).
+  Worked examples that don't show head motion (e.g. Example 1, Example 6)
+  are abridged baselines; in your actual output, add a head movement.
+- Most responses use head plus one dominant arm. Bilateral both-arm motion is
+  reserved for two specific cases: shrug responses (always bilateral; see
+  Example 5) and explicit bilateral interactions (e.g. the human gestures
+  with both arms). Choose the dominant arm based on where the human's motion
+  is concentrated in the camera frame — left and right are equally valid;
+  do not default to the right arm.
 - If you use `move_joints(...)`, prefer coordinated shoulder/elbow/head changes
   that form a readable pose rather than tiny no-op joint changes.
 - A response that only returns one elbow to its mechanical limit is usually too
   generic unless the frames strongly justify it.
-- Avoid driving shoulder pitch, shoulder roll, elbow roll, or head pitch to the
-  exact joint extremes; leave visible comfort margin.
+- Avoid driving shoulder pitch, shoulder roll, or elbow roll to the exact
+  joint extremes; leave visible comfort margin. Head motions may use the
+  wider end of the head joint limits (HeadYaw up to ±1.3 rad, HeadPitch
+  within −0.4 to +0.4 rad) when the clip supports a deliberate attention cue.
 - For pet-like responses, prefer one readable gesture with a short settle rather
   than several large disjoint posture changes.
+- Your physical vocabulary spans more than the few gestures shown in the worked
+  examples. Composable categories include (non-exhaustive): head tilts and nods;
+  single-arm waves, points, and beckons; two-arm claps and shrugs; hand-to-face
+  / hand-to-chin / hand-to-temple (thinking, surprise, puzzlement);
+  hand-to-mouth (gasp, hide-laughter); arms-crossed-over-chest (closed-off,
+  sceptical); arms-open-wide (welcoming, acknowledging); one-hand-on-hip
+  (casual, expectant); arms-up palms-out (caution, "wait", "stop"). Pick
+  whatever composition best fits the SPECIFIC clip — including gestures not
+  demonstrated in the worked examples. Most clips have an obvious complementary
+  response; for ambiguous or unconventional clips, consider gestures from the
+  wider vocabulary. The IK supports cross-body and midline reaches now, so
+  face-touch / hand-to-temple targets are physically reachable.
 
 # Concrete examples (treat as templates, NOT recipes to copy)
 
@@ -164,25 +238,95 @@ oscillate_joint('RElbowRoll', center=1.0, amplitude=0.5,
                 frequency=2.0, duration=1.5, decay=0.3)
 move_arm_ik('right', xyz=[0.02, -0.10, -0.20], duration=0.4)
 
-## Example 2 — motion_dynamics = "static" with curious affect
-# Small attentive head cue, brief settle. NO arms when the clip is just a
-# still pose — moving arms here would feel forced. The first move_head MUST
-# have a non-trivial yaw or pitch (>=0.10 rad in magnitude); a no-op
-# (yaw=0, pitch=0) is rejected by the safety validator and counted as a
-# fallback. Vary the angle direction with the human's apparent attention.
-move_head(yaw=0.18, pitch=-0.05, duration=0.4, trajectory='min_jerk')
-hold(0.6)
-move_head(yaw=-0.10, pitch=0.0, duration=0.4, trajectory='min_jerk')
+## Example 1L — same dynamics as Example 1 but lateralized to the LEFT arm
+# Pick this side when the human's active arm is in the right half of the
+# camera frame (the camera mirrors the human, so the human's left hand falls
+# in our right field; we respond on the same side of the frame — our left).
+# Note: LElbowRoll is negative by NAO convention (its valid range is roughly
+# [-1.54, -0.03], so the oscillation center is negative and the bounds stay
+# inside the limit). Left and right are equally valid; choose based on the
+# clip, not on habit.
+move_arm_ik('left', xyz=[0.15, 0.15, 0.10], duration=0.4)
+oscillate_joint('LElbowRoll', center=-1.0, amplitude=0.5,
+                frequency=2.0, duration=1.5, decay=0.3)
+move_arm_ik('left', xyz=[0.02, 0.10, -0.20], duration=0.4)
 
-## Example 3 — motion_dynamics = "approaching" with neutral/cautious affect
-# Lean upper body slightly back via shoulder pitch (NO lower-body joints) and
-# raise dominant hand in a soft "wait" posture. Use min_jerk for elegance.
-move_joints({{'LShoulderPitch': 1.6, 'RShoulderPitch': 1.6,
-             'HeadPitch': -0.05}},
+## Example 2 — motion_dynamics = "static" with curious affect
+# A clearly readable head turn, brief settle, then a smaller look-back. NO
+# arms when the clip is just a still pose — moving arms here would feel
+# forced. Head amplitudes here are deliberate and within the usable range;
+# a no-op (yaw=0 AND pitch=0) is rejected by the safety validator. Vary
+# the direction with the human's apparent attention.
+move_head(yaw=0.45, pitch=-0.25, duration=0.4, trajectory='min_jerk')
+hold(0.6)
+move_head(yaw=-0.30, pitch=0.10, duration=0.4, trajectory='min_jerk')
+
+## Example 3 — motion_dynamics = "approaching" with engaged/attentive affect
+# NAO has NO torso DoF, so a real body lean is not possible. We construct an
+# "engaged forward" cue from a deliberate head pitch DOWN (this is what the
+# camera actually reads as the lean) + a meaningful shoulder pitch change
+# that rotates both arms slightly forward + a raised dominant hand. The
+# head pitch leads the read; the shoulder change is secondary support.
+# Shoulder pitch delta is now visible (rest is ~1.5; we go to 0.7 ≈ 46°
+# forward) rather than the previous near-no-op nudge.
+move_joints({{'LShoulderPitch': 0.7, 'RShoulderPitch': 0.7,
+             'HeadPitch': 0.30}},
             duration=0.5, trajectory='min_jerk')
-move_arm_ik('right', xyz=[0.12, -0.10, 0.05], duration=0.4)
+move_arm_ik('right', xyz=[0.18, -0.12, 0.05], duration=0.4)
 set_hand('right', openness=0.7, duration=0.3)
 hold(0.5)
+
+## Example 5 — response_style = "shrug" for ambiguous intent / low confidence
+# Symmetric arm spread + palms open + small head tilt. This is the ONE case
+# where bilateral both-arm motion is the readable pattern. Use when
+# confidence < 0.4 or the human's intent is genuinely unclear from the
+# clip. ShoulderRoll signs follow NAO: +ve on L = arm out to the LEFT,
+# -ve on R = arm out to the RIGHT. ElbowRoll signs follow NAO anatomical
+# convention (L negative, R positive).
+move_joints({{'LShoulderRoll': 0.8, 'RShoulderRoll': -0.8,
+             'LElbowRoll': -0.4, 'RElbowRoll': 0.4,
+             'HeadPitch': -0.15}},
+            duration=0.5, trajectory='min_jerk')
+set_hand('left', openness=1.0, duration=0.3)
+set_hand('right', openness=1.0, duration=0.3)
+hold(0.6)
+
+## Example 6 — bilateral CLAP / hands-meet-at-midline via move_joints
+# Setting joints directly is one valid way to express a clap. The trick
+# is small ShoulderRoll (arms hang near body) + large ElbowRoll (forearms
+# fold across the chest toward midline). Use whenever the human is
+# clapping, praying, applauding, or bringing their two hands together.
+#
+# Paired `move_arm_ik` calls with midline targets (small |y|) are ALSO
+# valid for clap — the IK now falls back to the flipped elbow branch
+# when the anatomical branch can't reach. Either approach works; pick
+# whichever feels more natural for the clip.
+#
+# THIS IS THE BASELINE clap for response_style in {{complementary, mimic}}.
+# For response_style="dramatic" you must DEVIATE — see the dramatic
+# bullet in the Response styles section: double the ShoulderRoll spread
+# (e.g. 0.45 vs the 0.20 below), add HeadPitch oscillation between
+# cycles, and add at least one more pair of claps. A dramatic clap that
+# uses these same baseline numbers is incorrect.
+#
+# Hands-apart pose (arms ready to clap, just inside shoulder width):
+move_joints({{'LShoulderPitch': 1.1, 'RShoulderPitch': 1.1,
+             'LShoulderRoll': 0.20, 'RShoulderRoll': -0.20,
+             'LElbowYaw': -1.0, 'RElbowYaw': 1.0,
+             'LElbowRoll': -1.0, 'RElbowRoll': 1.0}},
+            duration=0.4, trajectory='min_jerk')
+# Hands-together pose (forearms folded across, hands meet near midline):
+move_joints({{'LShoulderRoll': 0.05, 'RShoulderRoll': -0.05,
+             'LElbowRoll': -1.5, 'RElbowRoll': 1.5}},
+            duration=0.25, trajectory='min_jerk')
+# Brief settle, then a second clap by reopening + closing again:
+hold(0.15)
+move_joints({{'LShoulderRoll': 0.20, 'RShoulderRoll': -0.20,
+             'LElbowRoll': -1.0, 'RElbowRoll': 1.0}},
+            duration=0.25, trajectory='min_jerk')
+move_joints({{'LShoulderRoll': 0.05, 'RShoulderRoll': -0.05,
+             'LElbowRoll': -1.5, 'RElbowRoll': 1.5}},
+            duration=0.25, trajectory='min_jerk')
 
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
@@ -195,6 +339,7 @@ First a JSON block, THEN a Python block, and nothing else:
   "confidence": <float 0.0-1.0>,
   "motion_dynamics": "oscillatory" | "approaching" | "retreating" |
                      "raising" | "lowering" | "static",
+  "response_style": "complementary" | "mimic" | "dramatic" | "shrug",
   "robot_intent": "<short description of how the ROBOT should respond, in
                    plain English; should match what the Python code below
                    actually does — e.g. 'wave back with right hand, warm
@@ -342,6 +487,27 @@ _LOCAL_MODEL_ID: Optional[str] = None
 _LOCAL_PROCESSOR = None
 _LOCAL_MODEL = None
 _LOCAL_MODEL_KIND: Optional[str] = None
+
+
+def sample_response_style(
+    weights: Dict[str, float],
+    rng: Optional[random.Random] = None,
+) -> str:
+    """Sample one of {complementary, mimic, dramatic} weighted by `weights`.
+
+    The shrug style is intentionally not sampled here — it is a confidence-
+    driven override the VLM applies when the assigned style does not fit
+    the clip (see the Response styles block in _BASE_SYSTEM_PROMPT).
+
+    Pass a seeded `random.Random` to make the choice deterministic. Used by
+    the evaluation harness to keep style choice reproducible per scenario.
+    """
+    rng = rng or random
+    names = list(weights.keys())
+    raw = [max(0.0, float(weights[n])) for n in names]
+    total = sum(raw) or 1.0
+    normalized = [v / total for v in raw]
+    return rng.choices(names, weights=normalized, k=1)[0]
 
 
 def build_system_prompt(joint_limits: Dict[str, Tuple[float, float]]) -> str:
@@ -1981,6 +2147,48 @@ class VLMClient:
         else:
             self.model = model or config.LOCAL_VLM_MODEL
 
+        # Response-style sampling state (Step 3 Stage A). When `_pinned_style`
+        # is set, every call uses that exact style instead of sampling — used
+        # for tests. `_style_rng`, when set via seed_style(), makes the
+        # sampler deterministic for evaluation reproducibility.
+        # `_last_assigned_style` is read by the controller after each call
+        # so it can be logged into result.json.
+        self._pinned_style: Optional[str] = None
+        self._style_rng: Optional[random.Random] = None
+        self._last_assigned_style: Optional[str] = None
+
+    # ------------------------------------------------------------------ style controls
+
+    def pin_style(self, style: Optional[str]) -> None:
+        """Force every subsequent call to use this style (or None to resume sampling)."""
+        self._pinned_style = style
+
+    def seed_style(self, seed: int) -> None:
+        """Seed the per-call style sampler for deterministic evaluation runs."""
+        self._style_rng = random.Random(int(seed))
+
+    @property
+    def last_assigned_style(self) -> Optional[str]:
+        return self._last_assigned_style
+
+    def _assign_style_for_call(self) -> str:
+        """Pick the response_style for the next call; cache it on the client."""
+        style = self._pinned_style or sample_response_style(
+            config.RESPONSE_STYLE_WEIGHTS, self._style_rng
+        )
+        self._last_assigned_style = style
+        return style
+
+    @staticmethod
+    def _style_directive(style: str) -> str:
+        return (
+            f"\n\nAssigned response_style for this call: **{style}**.\n"
+            f"Compose your response in this style UNLESS your confidence is "
+            f"below 0.4 or the human's intent is genuinely ambiguous from "
+            f"the frames, in which case override to \"shrug\". Include "
+            f"\"response_style\": \"<chosen>\" in your JSON output."
+        )
+
     def call(self, frames_b64: Sequence[str]) -> VLMResponse:
         if self.backend == 'openai':
             return self._call_openai(frames_b64)
@@ -1995,7 +2203,9 @@ class VLMClient:
         if not frames_b64:
             return VLMResponse({}, '', '', 0.0, False, error='no frames provided')
 
-        content: List[Dict[str, Any]] = [{"type": "text", "text": _USER_PROMPT}]
+        assigned_style = self._assign_style_for_call()
+        user_text = _USER_PROMPT + self._style_directive(assigned_style)
+        content: List[Dict[str, Any]] = [{"type": "text", "text": user_text}]
         for img_b64 in frames_b64:
             content.append({
                 'type': 'image_url',
@@ -2047,6 +2257,11 @@ class VLMClient:
 
             summary = _infer_visual_motion_summary(frames_b64)
             user_prompt = _build_local_user_prompt(frames_b64)
+            # Step 3 Stage A: append the per-call assigned response_style.
+            # Local repair/refinement loops below run with the same assignment
+            # (the directive is stable across the candidate-sampling loop).
+            assigned_style = self._assign_style_for_call()
+            user_prompt = user_prompt + self._style_directive(assigned_style)
             candidate_count = max(1, int(config.LOCAL_VLM_NUM_CANDIDATES))
             raw_candidates: List[str] = []
 

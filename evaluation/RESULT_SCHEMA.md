@@ -51,6 +51,7 @@ ends up Stage-2-augmented.
 | `input` | `dict` | `{"mode": "webcam"\|"replay", "source": "<video path or replay code path>"}` |
 | `frames_count` | `int` | Number of frames sampled and sent to the VLM. `0` for replay mode. |
 | `vlm_response` | `dict` | VLM response payload — see §4. `{}` on `vlm_timeout`; `{"error": ...}` on `vlm_exception`. |
+| `assigned_response_style` | `str \| null` | Style sampled by the controller and injected into the VLM's user message for this call. One of `complementary` / `mimic` / `dramatic`. `null` when no VLM call was made (replay mode) or when the client does not implement style sampling (e.g. `RuleBaselineClient`). May still be populated on `vlm_timeout` / `vlm_exception` if the sampler ran before the failure. See [vlm_client.sample_response_style](../nao_VLM/controllers/nao_vlm_test/vlm_client.py). |
 | `exec_outcome` | `dict` | Sandbox execution result — see §5. |
 | `fallback_stats` | `dict` | Fallback-policy fire counts — see §6. `{}` in replay mode. |
 | `timeline` | `list[dict]` | Ordered stage events — see §7. (Absent in replay mode.) |
@@ -98,6 +99,7 @@ Built by `_response_payload(rsp)` in `nao_vlm_test.py`.
 | `affect` | `str` | Human's apparent emotional state. |
 | `confidence` | `float` | VLM's confidence, 0.0–1.0. |
 | `motion_dynamics` | `str` | `"oscillatory"` \| `"approaching"` \| `"retreating"` \| `"raising"` \| `"lowering"` \| `"static"` |
+| `response_style` | `str` | Style the VLM actually used. `"complementary"` \| `"mimic"` \| `"dramatic"` \| `"shrug"`. May differ from the top-level `assigned_response_style` when the VLM overrode to `"shrug"` because confidence was low or the human's intent was ambiguous. Absent on older runs and on local-VLM outputs that did not emit the field. |
 | `robot_intent` | `str` | Plain-English description of how the robot should respond (should match `python_code`). |
 
 > In **replay mode**, `vlm_response` is synthetic: `ok=True`, `semantic_context={}`,
@@ -275,6 +277,11 @@ If you change a key, check these consumers:
 | `evaluation/metrics.py` (`compute_result_metrics`) | `artifacts.joint_states`, `artifacts.sandbox_events`, `exec_outcome.ok`, `vlm_response.python_code`, `fallback_stats.tier_a_fires` / `tier_b_fires` / `tier_c_fires`. |
 | `evaluation/judge.py` (`judge_one`, `_find_images`, `_cache_key`) | `artifacts.run_dir`, `artifacts.robot_motion_contact_sheet` (preferred), `artifacts.robot_screenshot` (fallback), `vlm_response.semantic_context.robot_intent`, `vlm_response.python_code`, `scenario_expected_response`, `scenario_id`, `method`. |
 | `evaluation/judge.py` (`write_report`) | `scenario_id`, `method`. |
+
+> **Future:** Phase 5 aggregation may wire `assigned_response_style` (Stage 1) and
+> `vlm_response.semantic_context.response_style` (Stage 1) into a per-scenario
+> "VLM override rate" metric, indicating how often the model overrode the
+> assigned style to `"shrug"`. No reader consumes these fields yet.
 
 ---
 
