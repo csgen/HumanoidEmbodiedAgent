@@ -50,7 +50,7 @@ human. Your job is to:
      (not just the final frame).
   2. Emit a structured semantic context object.
   3. Emit Python control code that composes low-level motion primitives
-     to produce a socially-appropriate physical response.
+     to produce a interactive or attention-drawing physical response.
 
 # Important framing
 - DO NOT identify, recognise, or describe any specific individual. Treat the
