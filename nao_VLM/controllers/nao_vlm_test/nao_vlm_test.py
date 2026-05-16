@@ -1020,6 +1020,13 @@ def _run_oneshot_demo(
         or when no call has been made yet."""
         return getattr(client, 'last_assigned_style', None)
 
+    # Idle overlay during oneshot waits — without this, the robot stands
+    # frozen for several seconds during the VLM HTTP call, which reads as
+    # "the controller died". The animator handles both the active "alive"
+    # motion and a passive relaxation back to NEUTRAL_POSE for joints the
+    # last primitive may have left in a non-rest position.
+    idle_animator = IdleAnimator(vlm_api.motors, vlm_api._clip_to_motor_limits)
+
     stage('waiting_for_frames', f'target={config.VLM_FRAME_COUNT} source={config.WEBCAM_SOURCE!r}')
     ready = _wait_for_frame_buffer(
         robot=robot,
@@ -1088,6 +1095,10 @@ def _run_oneshot_demo(
             return
         vlm_api._sync_sensors()
         vlm_api._record_metrics_step()
+        # Keep the robot visibly alive during the multi-second VLM call.
+        # Primitives own the loop when they run, so this only fires here
+        # (the wait window) and not during executor.run below.
+        idle_animator.tick(robot.getTime())
 
     if rsp is None:
         stage('vlm_timeout', f'after {config.ONE_SHOT_VLM_TIMEOUT:.1f}s')
