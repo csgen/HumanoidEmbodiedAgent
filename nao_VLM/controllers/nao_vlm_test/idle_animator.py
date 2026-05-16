@@ -80,16 +80,22 @@ class IdleAnimator:
             # phase gives a natural mild sway.
             'LShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(0.80 * t),
             'RShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(0.80 * t + math.pi),
-            # Step 6 Part D: tiny bilateral knee bounce ~3° peak, paired in
-            # phase (symmetric squat). Center 0.10 rad is the typical NAO
-            # H25 standing knee bend. Ankles move in counter-phase to keep
-            # the feet flat, which keeps the CoM roughly over the feet so
-            # the robot does not topple from the knee motion. If the robot
-            # ever loses balance, comment out these four lines.
-            'LKneePitch':  lambda t: 0.10 + 0.05 * math.sin(0.50 * t),
-            'RKneePitch':  lambda t: 0.10 + 0.05 * math.sin(0.50 * t),
-            'LAnklePitch': lambda t: -0.05 - 0.025 * math.sin(0.50 * t),
-            'RAnklePitch': lambda t: -0.05 - 0.025 * math.sin(0.50 * t),
+            # Step 6 Part D: bilateral knee bounce, paired in phase
+            # (symmetric squat). Amplitude bumped to ±0.12 rad (~7°) so the
+            # hip rise/fall is clearly visible from a front view (was ±0.05
+            # → ~3° → only ~5 mm hip motion, easy to miss). Center 0.10 rad
+            # is a slight standing crouch; the robot will settle into this
+            # within ~1 s of startup if it began with knees straight.
+            # Ankles move in counter-phase at half-amplitude to keep the
+            # feet flat — the CoM stays roughly over the feet so paired
+            # knee motion does not topple the robot. Frequency 0.40 rad/s
+            # (period ~16 s) is slow enough to read as breathing/sway,
+            # not nervous. If the robot ever loses balance, halve the knee
+            # amplitude back to 0.05 or comment out these four lines.
+            'LKneePitch':  lambda t: 0.10 + 0.12 * math.sin(0.40 * t),
+            'RKneePitch':  lambda t: 0.10 + 0.12 * math.sin(0.40 * t),
+            'LAnklePitch': lambda t: -0.05 - 0.06 * math.sin(0.40 * t),
+            'RAnklePitch': lambda t: -0.05 - 0.06 * math.sin(0.40 * t),
         }
         self._overlay_joints: Set[str] = set(self._formulas.keys())
 
