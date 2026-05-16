@@ -58,7 +58,8 @@ cp nao_VLM/controllers/nao_vlm_test/runtime.ini.example nao_VLM/controllers/nao_
 ```
 Edit the `COMMAND =` line to the **absolute path** of the Python interpreter
 that has the project dependencies (e.g. your `.venv/bin/python3` or conda env
-python). `runtime.ini` is gitignored — it is per-machine.
+python). `runtime.ini.example` is the committed template; `runtime.ini` is
+gitignored and stays local to each teammate's machine.
 
 ### 2. Configure `.env`
 ```bash
@@ -154,7 +155,9 @@ automatically and drives the robot.
 The evaluation framework runs the controller across a set of scenario videos,
 computes metrics (execution success, safety adherence, joint jerk, CoM
 stability, fallback rate), and can score responses with a VLM-as-Judge —
-comparing the generative system (`cap`) against a rule-based baseline.
+comparing the generative system (`cap`) against a rule-based baseline. This is
+the active milestone for the current branch: evaluation first, live demo
+second.
 
 ### One command (recommended)
 ```bash
@@ -174,13 +177,15 @@ add `--headless` for windowless runs.
 python -m evaluation.run_benchmark --scenario-set pilot --method rule_baseline
 python -m evaluation.run_benchmark --scenario-set pilot --method cap
 python -m evaluation.judge artifacts/eval/<exact_file>.json --output artifacts/eval/report.md
+python -m evaluation.summarize_results artifacts/eval/<exact_file>.json --output artifacts/eval/<exact_file>_summary.md
 ```
 
 ### Scenario sets
 - **`pilot`** — 10 sample gesture clips already in `debug_video_samples/`.
   Ready to run now.
-- **`canonical`** — the 8 project benchmark scenarios. Record these clips and
-  place them in the `videos/` folder with these exact names:
+- **`canonical`** — the 8 project benchmark scenarios. If the files are not
+  already present locally, record them and place them in the `videos/` folder
+  with these exact names:
 
   | File | Scenario |
   |---|---|
@@ -198,11 +203,41 @@ python -m evaluation.judge artifacts/eval/<exact_file>.json --output artifacts/e
   be added incrementally. The scenario registry (intents, expected responses)
   lives in `evaluation/scenarios.py`.
 
+  Recording protocol for the canonical 8:
+  - fixed camera viewpoint
+  - 4-8 seconds per clip
+  - 1 second of stillness before and after the gesture
+  - clear full-body framing for `walk_away` and `crouch`
+  - neutral background and stable lighting when possible
+
+  One convenient way to record a canonical clip locally:
+
+  ```bash
+  python3 scripts/record_webcam.py --output-path videos/scenario_01_wave.mp4
+  ```
+
 Then run with `--scenario-set canonical` (or `--scenario-set all`).
 
 The per-run `result.json` schema is documented in `evaluation/RESULT_SCHEMA.md`.
 
-## D. Project Plan & Documentation Reference
+## D. Novelty / Contribution
+
+This project should be framed as embodied AI, not as a thin API demo. The
+current contribution is:
+
+- multi-frame VLM perception instead of single-frame gesture recognition
+- Code-as-Policies over low-level motion primitives, not canned behavior labels
+- AST sandbox validation before actuation
+- physical evaluation with jerk, CoM proxies, fallbacks, and a rule baseline
+- composite robot responses built from sequential primitives and coordinated
+  `move_joints(...)`, not fixed animations
+
+The current branch intentionally does **not** add a true concurrent primitive
+scheduler. Coordinated bilateral motion is already supported through
+`move_joints(...)`; overlapping independent primitive execution remains future
+work unless evaluation proves it is necessary.
+
+## E. Project Plan & Documentation Reference
 
 - **`Humanoid Embodied Agent — Proposal vs Current Implementation Analysis & Refined Plan.md`**
   — the project implementation plan: the original proposal, the gap analysis,
@@ -212,7 +247,8 @@ The per-run `result.json` schema is documented in `evaluation/RESULT_SCHEMA.md`.
 - **`AGENTS.md`** — deep technical handoff for contributors: architecture, the
   cap-vs-baseline design, environment variables, testing.
 - **`COLLABORATOR_GUIDE.md`** — day-to-day collaborator runbook: demo scripts,
-  recording conventions, and branch workflow.
+  recording conventions, branch workflow, and the current no-Docker/no-HPC
+  collaboration scope.
 
 ## Helpful Links
 - [Webots official site](https://cyberbotics.com)

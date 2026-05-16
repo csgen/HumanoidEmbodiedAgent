@@ -17,6 +17,7 @@ import config as ctrl_config
 from evaluation.metrics import compute_com_excursion, compute_jerk, compute_result_metrics, load_jsonl
 from evaluation.rule_baseline import code_for_intent, infer_label_from_scenario_id
 from evaluation.scenarios import get_scenarios
+from evaluation.summarize_results import main as summarize_main
 from metrics_recorder import MetricsRecorder
 from sandbox_exec import SandboxExecutor
 
@@ -144,6 +145,62 @@ class Phase5EvaluationTests(unittest.TestCase):
         })
         self.assertEqual(metrics['execution_success'], 0.0)
         self.assertEqual(metrics['safety_adherence'], 1.0)
+
+    def test_summarize_results_writes_expected_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            aggregate = tmp_path / 'aggregate.json'
+            output = tmp_path / 'summary.md'
+            payload = [
+                {
+                    'run_id': 'cap_r1',
+                    'scenario_id': 'pilot_waving',
+                    'method': 'cap',
+                    'status': 'ok',
+                    'exec_outcome': {'ok': True},
+                    'artifacts': {
+                        'run_dir': '/tmp/cap',
+                        'result_json': '/tmp/cap/result.json',
+                        'demo_summary': '/tmp/cap/demo_summary.jpg',
+                    },
+                    'metrics': {
+                        'execution_success': 1.0,
+                        'safety_adherence': 1.0,
+                        'fallback_activation_count': 0,
+                        'jerk_avg_abs_jerk': 1.1,
+                        'com_max_xy_excursion_m': 0.006,
+                    },
+                },
+                {
+                    'run_id': 'rule_r1',
+                    'scenario_id': 'pilot_waving',
+                    'method': 'rule_baseline',
+                    'status': 'ok',
+                    'exec_outcome': {'ok': True},
+                    'artifacts': {
+                        'run_dir': '/tmp/rule',
+                        'result_json': '/tmp/rule/result.json',
+                        'demo_summary': '/tmp/rule/demo_summary.jpg',
+                    },
+                    'metrics': {
+                        'execution_success': 1.0,
+                        'safety_adherence': 1.0,
+                        'fallback_activation_count': 1,
+                        'jerk_avg_abs_jerk': 2.2,
+                        'com_max_xy_excursion_m': 0.01,
+                    },
+                },
+            ]
+            aggregate.write_text(json.dumps(payload, indent=2) + '\n', encoding='utf-8')
+            rc = summarize_main([str(aggregate), '--output', str(output), '--top-k', '2'])
+            self.assertEqual(rc, 0)
+            text = output.read_text(encoding='utf-8')
+            self.assertIn('## Per-Method Averages', text)
+            self.assertIn('## Per-Scenario Comparison', text)
+            self.assertIn('## Failures / Timeouts / Fallbacks', text)
+            self.assertIn('## Strongest Demo Artifacts', text)
+            self.assertIn('pilot_waving', text)
+            self.assertIn('rule_baseline', text)
 
 
 if __name__ == '__main__':

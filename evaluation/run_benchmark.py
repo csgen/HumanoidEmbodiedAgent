@@ -186,6 +186,166 @@ def write_aggregate(results: List[Dict[str, Any]], out_dir: Path, run_group: str
     return json_path
 
 
+def run_persistent_batch(
+    scenarios: List[ScenarioSpec],
+    *,
+    method: str,
+    round_index: int,
+    run_group: str,
+    headless: bool,
+    timeout_s: float,
+    realtime: bool = False,
+) -> List[Dict[str, Any]]:
+    """Run ALL scenarios in a single persistent Webots session (RUN_MODE=batch).
+
+    Writes a playlist JSON, starts one Webots process, waits for completion,
+    then reads each scenario's result.json. Unlike run_one(), the Webots window
+    stays open for the full batch.
+    """
+    import tempfile
+
+    webots_bin = find_webots()
+
+    # Build per-scenario specs for the playlist
+    scenario_specs = []
+    for spec in scenarios:
+        run_id = f'{run_group}__{method}__{spec.id}__r{round_index:02d}'
+        metrics_dir = REPO_ROOT / 'artifacts' / 'oneshot' / run_id
+        scenario_specs.append({
+            'id': spec.id,
+            'video_path': str(spec.resolved_video_path()),
+            'method': method,
+            'run_id': run_id,
+            'metrics_dir': str(metrics_dir),
+            'hint': f'{spec.expected_intent}; expected response: {spec.expected_response}',
+            'status': 'pending',
+        })
+
+    playlist = {'scenarios': scenario_specs, 'batch_status': 'pending'}
+    playlist_file = Path(tempfile.mktemp(suffix='_batch_playlist.json'))
+    playlist_file.write_text(
+        json.dumps(playlist, indent=2, ensure_ascii=False) + '\n',
+        encoding='utf-8',
+    )
+    print(f'[benchmark] batch playlist: {playlist_file}')
+
+    env = os.environ.copy()
+    # Use the first scenario to set up base env; per-scenario vars are in playlist
+    first_spec = scenarios[0]
+    env.update({
+        'REPO_DIR': str(REPO_ROOT),
+        'RUN_MODE': 'batch',
+        'INPUT_MODE': 'webcam',
+        'WEBCAM_SOURCE': str(first_spec.resolved_video_path()),
+        'VLM_BACKEND': 'rule_baseline' if method == 'rule_baseline' else env.get('VLM_BACKEND', 'openai'),
+        'EVAL_METHOD': method,
+        'BATCH_PLAYLIST_FILE': str(playlist_file),
+        'BATCH_INTER_SCENARIO_HOLD': env.get('BATCH_INTER_SCENARIO_HOLD', '2.0'),
+        'ONE_SHOT_EXIT_AFTER_EXECUTE': '1',
+        'ONE_SHOT_POST_EXECUTION_SECONDS': env.get('ONE_SHOT_POST_EXECUTION_SECONDS', '2.0'),
+        'ONE_SHOT_BUFFER_TIMEOUT': env.get('ONE_SHOT_BUFFER_TIMEOUT', '8'),
+        'ONE_SHOT_VLM_TIMEOUT': env.get('ONE_SHOT_VLM_TIMEOUT', '120'),
+        'ONE_SHOT_VIDEO_SETTLE_SECONDS': env.get('ONE_SHOT_VIDEO_SETTLE_SECONDS', '0'),
+        'FRAME_BUFFER_SECONDS': env.get('FRAME_BUFFER_SECONDS', '3'),
+        'FRAME_BUFFER_FPS': env.get('FRAME_BUFFER_FPS', '10'),
+        'VLM_FRAME_COUNT': env.get('VLM_FRAME_COUNT', '5'),
+    })
+    if method == 'cap' and env.get('VLM_BACKEND', '').strip().lower() in {'', 'auto'}:
+        env['VLM_BACKEND'] = 'openai'
+
+    # Total timeout = per-scenario timeout × number of scenarios + generous buffer
+    total_timeout = timeout_s * len(scenarios) + 60.0
+
+    cmd = build_webots_command(webots_bin, headless=headless, realtime=realtime)
+    print(f'[benchmark] batch mode: ONE Webots window for {len(scenarios)} scenarios')
+    print(f'[benchmark] timeout: {total_timeout:.0f}s')
+
+    started = time.time()
+    timed_out = False
+    timeout_error = ''
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(REPO_ROOT),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=total_timeout,
+            check=False,
+        )
+        webots_returncode = proc.returncode
+        stdout_tail = proc.stdout[-8000:]
+        stderr_tail = proc.stderr[-8000:]
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        timeout_error = str(exc)
+        webots_returncode = None
+        stdout_raw = exc.stdout or ''
+        stderr_raw = exc.stderr or ''
+        if isinstance(stdout_raw, bytes):
+            stdout_raw = stdout_raw.decode(errors='replace')
+        if isinstance(stderr_raw, bytes):
+            stderr_raw = stderr_raw.decode(errors='replace')
+        stdout_tail = stdout_raw[-8000:]
+        stderr_tail = stderr_raw[-8000:]
+
+    elapsed = time.time() - started
+
+    # Read updated playlist to get per-scenario status
+    try:
+        playlist = json.loads(playlist_file.read_text(encoding='utf-8'))
+    except Exception:
+        pass
+
+    # Build result list by reading each scenario's result.json
+    results: List[Dict[str, Any]] = []
+    for i, spec_dict in enumerate(playlist.get('scenarios', scenario_specs)):
+        orig_spec = scenarios[i] if i < len(scenarios) else None
+        run_id = spec_dict.get('run_id', '')
+        metrics_dir = Path(spec_dict.get('metrics_dir', ''))
+        result_path = metrics_dir / 'result.json'
+
+        if result_path.exists():
+            result = json.loads(result_path.read_text(encoding='utf-8'))
+        else:
+            status = 'timeout' if timed_out else 'missing_result'
+            result = {
+                'run_id': run_id,
+                'scenario_id': spec_dict.get('id', ''),
+                'method': method,
+                'status': status,
+                'exec_outcome': {'ok': False, 'error': timeout_error or 'result.json missing'},
+                'artifacts': {'run_dir': str(metrics_dir), 'result_json': str(result_path)},
+                'fallback_stats': {},
+            }
+
+        if orig_spec is not None:
+            result.update({
+                'scenario_expected_intent': orig_spec.expected_intent,
+                'scenario_expected_motion_dynamics': orig_spec.expected_motion_dynamics,
+                'scenario_expected_response': orig_spec.expected_response,
+                'video_path': str(orig_spec.resolved_video_path()),
+            })
+        result.update({
+            'webots_returncode': webots_returncode,
+            'webots_timed_out': timed_out,
+            'webots_elapsed_seconds': elapsed,
+            'webots_stdout_tail': stdout_tail,
+            'webots_stderr_tail': stderr_tail,
+        })
+        result['metrics'] = compute_result_metrics(result)
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps(result, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        results.append(result)
+
+    try:
+        playlist_file.unlink()
+    except Exception:
+        pass
+
+    return results
+
+
 def main(argv: List[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description='Run Phase-5 Webots benchmark.')
     parser.add_argument('--scenario-set', default='pilot', choices=['pilot', 'canonical', 'all'])
@@ -196,6 +356,9 @@ def main(argv: List[str] | None = None) -> int:
     parser.add_argument('--judge', action='store_true',
                         help='After the benchmark, run the VLM-as-Judge on the aggregate '
                              'this run produced (uses the exact file path, no shell glob).')
+    parser.add_argument('--persistent', action='store_true',
+                        help='Run all scenarios in ONE persistent Webots window (batch mode). '
+                             'The Webots window stays open throughout all scenarios.')
     parser.add_argument('--headless', action='store_true')
     parser.add_argument('--realtime', action='store_true',
                         help='Run Webots at real-time speed (--mode=realtime) so you can '
@@ -218,31 +381,43 @@ def main(argv: List[str] | None = None) -> int:
     results: List[Dict[str, Any]] = []
     for method in methods:
         for round_index in range(1, max(1, args.rounds) + 1):
-            for spec in scenarios:
-                print(f'[benchmark] {method} {spec.id} round {round_index}/{args.rounds}')
-                try:
-                    results.append(
-                        run_one(
-                            spec,
-                            method=method,
-                            round_index=round_index,
-                            run_group=run_group,
-                            headless=args.headless,
-                            timeout_s=args.timeout_s,
-                            realtime=args.realtime,
+            if args.persistent:
+                print(f'[benchmark] BATCH mode: {method} round {round_index}/{args.rounds} '
+                      f'({len(scenarios)} scenarios in ONE Webots window)')
+                batch_results = run_persistent_batch(
+                    scenarios,
+                    method=method,
+                    round_index=round_index,
+                    run_group=run_group,
+                    headless=args.headless,
+                    timeout_s=args.timeout_s,
+                    realtime=args.realtime,
+                )
+                results.extend(batch_results)
+            else:
+                for spec in scenarios:
+                    print(f'[benchmark] {method} {spec.id} round {round_index}/{args.rounds}')
+                    try:
+                        results.append(
+                            run_one(
+                                spec,
+                                method=method,
+                                round_index=round_index,
+                                run_group=run_group,
+                                headless=args.headless,
+                                timeout_s=args.timeout_s,
+                                realtime=args.realtime,
+                            )
                         )
-                    )
-                except subprocess.TimeoutExpired as exc:
-                    # run_one normally handles timeouts so it can salvage a
-                    # completed result.json. Keep this as a defensive fallback.
-                    results.append({
-                        'run_id': f'{run_group}__{method}__{spec.id}__r{round_index:02d}',
-                        'scenario_id': spec.id,
-                        'method': method,
-                        'status': 'timeout',
-                        'exec_outcome': {'ok': False, 'error': str(exc)},
-                        'metrics': {'execution_success': 0.0, 'safety_adherence': 0.0},
-                    })
+                    except subprocess.TimeoutExpired as exc:
+                        results.append({
+                            'run_id': f'{run_group}__{method}__{spec.id}__r{round_index:02d}',
+                            'scenario_id': spec.id,
+                            'method': method,
+                            'status': 'timeout',
+                            'exec_outcome': {'ok': False, 'error': str(exc)},
+                            'metrics': {'execution_success': 0.0, 'safety_adherence': 0.0},
+                        })
     aggregate = write_aggregate(results, args.output_dir, run_group)
     print(f'[benchmark] wrote {aggregate}')
 

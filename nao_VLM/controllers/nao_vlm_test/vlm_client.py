@@ -328,6 +328,50 @@ move_joints({{'LShoulderRoll': 0.05, 'RShoulderRoll': -0.05,
              'LElbowRoll': -1.5, 'RElbowRoll': 1.5}},
             duration=0.25, trajectory='min_jerk')
 
+## Example 7 — arms-crossed-over-chest (rejection, closed-off, sceptical)
+# Both forearms fold inward across the chest. Use for cross_arms scenario or
+# when the human has crossed their arms in a closed/rejection posture.
+# ShoulderRoll near zero brings arms to front; large ElbowRoll folds them.
+move_head(yaw=0.0, pitch=0.05, duration=0.35, trajectory='min_jerk')
+move_joints({{'LShoulderPitch': 0.95, 'RShoulderPitch': 0.95,
+             'LShoulderRoll': 0.05, 'RShoulderRoll': -0.05,
+             'LElbowRoll': -1.45, 'RElbowRoll': 1.45,
+             'LElbowYaw': -0.8, 'RElbowYaw': 0.8}},
+            duration=0.5, trajectory='min_jerk')
+hold(0.6)
+
+## Example 8 — handshake / greeting (extend dominant hand toward human)
+# Raise right arm to mid-height, palm open, small head tilt downward to
+# acknowledge. Use for handshake scenario or reaching-out greetings.
+move_head(yaw=0.0, pitch=0.10, duration=0.3, trajectory='min_jerk')
+move_arm_ik('right', xyz=[0.20, -0.06, 0.04], duration=0.5)
+set_hand('right', openness=0.85, duration=0.3)
+hold(0.5)
+move_arm_ik('right', xyz=[0.04, -0.10, -0.18], duration=0.5)
+
+## Example 9 — reject / "no" wave (lateral wrist oscillation)
+# Short arm raise, then oscillate the wrist to signal "no" or "stop".
+# Use for reject_gesture scenario or when human is signalling denial.
+move_head(yaw=-0.15, pitch=0.0, duration=0.3)
+move_arm_ik('right', xyz=[0.12, -0.12, 0.08], duration=0.35)
+oscillate_joint('RWristYaw', center=0.0, amplitude=0.55, frequency=2.2, duration=1.0, decay=0.25)
+move_arm_ik('right', xyz=[0.04, -0.10, -0.18], duration=0.35)
+
+## Example 10 — walk-away response (small farewell, look away attentively)
+# Human is leaving. Robot gives a small sideways head turn with brief pause —
+# a polite farewell acknowledgment. Keep motion small and calm.
+move_head(yaw=0.25, pitch=-0.05, duration=0.35, trajectory='min_jerk')
+hold(0.5)
+move_head(yaw=-0.12, pitch=0.0, duration=0.35, trajectory='min_jerk')
+idle(0.4)
+
+## Example 11 — crouch / lower-focus response (robot looks down attentively)
+# Human is crouching. Robot tilts head down to maintain eye contact.
+# NAO has no torso pitch, so head pitch is the primary attentive cue.
+move_head(yaw=0.0, pitch=0.28, duration=0.4, trajectory='min_jerk')
+hold(0.55)
+move_head(yaw=0.0, pitch=0.05, duration=0.35, trajectory='min_jerk')
+
 # Output format — MANDATORY
 First a JSON block, THEN a Python block, and nothing else:
 

@@ -5,6 +5,7 @@ Default output directory: <repo>/example_video [默认输出目录：<repo>/exam
 
 Usage: [用法：]
   python3 scripts/record_webcam.py
+  python3 scripts/record_webcam.py --output-path videos/scenario_01_wave.mp4 --auto-start
 
 Keys: [按键：]
   r  Start/Stop recording [开始/停止录制]
@@ -23,7 +24,8 @@ from pathlib import Path
 import cv2
 
 
-DEFAULT_OUTPUT_DIR = Path("/home/darian/桌面/humanoidRobot/example_video")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "example_video"
 DEFAULT_LINUX_RESOLUTIONS = [
     (1280, 720),
     (640, 480),
@@ -41,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
         help=f"Output directory, default [输出目录，默认] {DEFAULT_OUTPUT_DIR}",
+    )
+    parser.add_argument(
+        "--output-path",
+        type=Path,
+        default=None,
+        help="Exact output file path (for canonical recordings) [精确输出文件路径（用于 canonical 录制）]",
     )
     parser.add_argument(
         "--auto-start",
@@ -62,6 +70,16 @@ def create_writer(output_path: Path, fps: float, width: int, height: int) -> cv2
     if not writer.isOpened():
         raise RuntimeError(f"Failed to create video file: [无法创建视频文件：]{output_path}")
     return writer
+
+
+def resolve_output_path(output_dir: Path, output_path: Path | None) -> Path:
+    if output_path is not None:
+        path = output_path if output_path.is_absolute() else (REPO_ROOT / output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    output_dir.mkdir(parents=True, exist_ok=True)
+    filename = datetime.now().strftime("webcam_%Y%m%d_%H%M%S.mp4")
+    return output_dir / filename
 
 
 def _resolve_backend_names(requested: str) -> list[tuple[str, int]]:
@@ -150,8 +168,7 @@ def main() -> int:
     started_at = None
 
     if args.auto_start:
-        filename = datetime.now().strftime("webcam_%Y%m%d_%H%M%S.mp4")
-        output_path = args.output_dir / filename
+        output_path = resolve_output_path(args.output_dir, args.output_path)
         writer = create_writer(output_path, actual_fps, actual_width, actual_height)
         recording = True
         started_at = time.time()
@@ -217,8 +234,7 @@ def main() -> int:
                     writer = None
                     print(f"Recording completed: [录制完成：]{output_path}")
                 else:
-                    filename = datetime.now().strftime("webcam_%Y%m%d_%H%M%S.mp4")
-                    output_path = args.output_dir / filename
+                    output_path = resolve_output_path(args.output_dir, args.output_path)
                     writer = create_writer(output_path, actual_fps, actual_width, actual_height)
                     recording = True
                     started_at = time.time()

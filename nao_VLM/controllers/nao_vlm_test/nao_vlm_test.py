@@ -988,6 +988,36 @@ def _save_oneshot_artifacts(frames_b64: List[str], rsp, exec_result=None,
     return out_dir
 
 
+def _patch_config_for_scenario(spec: Dict[str, Any]) -> None:
+    """Monkeypatch config module variables in-place for the batch scenario."""
+    video_path = str(spec.get('video_path', ''))
+    if video_path and not Path(video_path).is_absolute() and '://' not in video_path:
+        video_path = str(config.REPO_ROOT / video_path)
+    if video_path:
+        config.WEBCAM_SOURCE = video_path
+    config.EVAL_SCENARIO_ID = spec.get('id', '')
+    config.EVAL_METHOD = spec.get('method', config.EVAL_METHOD)
+    config.METRICS_RUN_ID = spec.get('run_id', '')
+    config.METRICS_OUTPUT_DIR = spec.get('metrics_dir', '')
+    config.VLM_SCENARIO_HINT = spec.get('hint', '')
+    if spec.get('method') == 'rule_baseline':
+        config.VLM_BACKEND = 'rule_baseline'
+
+
+def _reset_robot_to_neutral(robot: 'Supervisor', timestep: int, vlm_api: 'NaoVlmAPI') -> None:
+    """Return all upper-body joints to neutral standing pose between scenarios."""
+    print('[batch] resetting robot to neutral pose...')
+    try:
+        vlm_api.move_joints(config.NEUTRAL_POSE, duration=0.5, trajectory='min_jerk')
+        settle_steps = max(1, int(round(0.7 * 1000.0 / timestep)))
+        for _ in range(settle_steps):
+            if robot.step(timestep) == -1:
+                break
+            vlm_api._sync_sensors()
+    except Exception as e:
+        print(f'[batch] WARNING: neutral reset failed: {e}')
+
+
 def _run_oneshot_demo(
     robot: Supervisor,
     timestep: int,
@@ -1279,6 +1309,126 @@ def _run_replay_demo(
         })
 
 
+def _run_batch_demo(
+    robot: 'Supervisor',
+    timestep: int,
+    vlm_api: 'NaoVlmAPI',
+    executor: 'SandboxExecutor',
+    fallback: 'FallbackPolicy',
+    client: Any,
+) -> None:
+    """Process multiple video scenarios in one persistent Webots session.
+
+    Reads scenario list from BATCH_PLAYLIST_FILE. After each scenario it
+    resets the robot pose and updates the playlist file so the orchestrator
+    (run_benchmark.py --persistent) can track progress.
+    """
+    import json as _json
+
+    playlist_path = Path(config.BATCH_PLAYLIST_FILE).expanduser().resolve()
+    if not playlist_path.exists():
+        print(f'[batch] ERROR: playlist not found: {playlist_path}')
+        return
+
+    try:
+        playlist = _json.loads(playlist_path.read_text(encoding='utf-8'))
+    except Exception as exc:
+        print(f'[batch] ERROR: cannot read playlist: {exc}')
+        return
+
+    scenarios = playlist.get('scenarios', [])
+    if not scenarios:
+        print('[batch] ERROR: playlist has no scenarios')
+        return
+
+    def _write_playlist() -> None:
+        try:
+            playlist_path.write_text(
+                _json.dumps(playlist, indent=2, ensure_ascii=False) + '\n',
+                encoding='utf-8',
+            )
+        except Exception as exc:
+            print(f'[batch] WARNING: playlist write failed: {exc}')
+
+    print(f'[batch] starting — {len(scenarios)} scenario(s) in playlist')
+
+    for i, spec in enumerate(scenarios):
+        scenario_id = spec.get('id', f'scenario_{i}')
+        print(f'\n[batch] {"=" * 60}')
+        print(f'[batch] Scenario {i + 1}/{len(scenarios)}: {scenario_id}')
+        print(f'[batch] video: {spec.get("video_path", "?")}')
+        print(f'[batch] method: {spec.get("method", "cap")}')
+        print(f'[batch] {"=" * 60}')
+
+        spec['status'] = 'running'
+        _write_playlist()
+
+        _patch_config_for_scenario(spec)
+
+        new_buffer: Optional['FrameBuffer'] = None
+        metrics_recorder: Optional['MetricsRecorder'] = None
+        try:
+            new_buffer = FrameBuffer(
+                source=config.WEBCAM_SOURCE,
+                buffer_seconds=config.FRAME_BUFFER_SECONDS,
+                fps=config.FRAME_BUFFER_FPS,
+                backend=config.FRAMEBUFFER_BACKEND,
+                frame_width=config.FRAMEBUFFER_WIDTH,
+                frame_height=config.FRAMEBUFFER_HEIGHT,
+            ).start()
+
+            run_id = spec.get('run_id', f'batch_{scenario_id}')
+            metrics_dir_str = spec.get('metrics_dir', '')
+            metrics_dir = (
+                Path(metrics_dir_str).expanduser().resolve()
+                if metrics_dir_str
+                else config.ARTIFACTS_DIR / run_id
+            )
+            metrics_recorder = MetricsRecorder(run_id, metrics_dir)
+            vlm_api.set_metrics_recorder(metrics_recorder)
+            executor.set_metrics_recorder(metrics_recorder)
+
+            if config.METRICS_RUN_ID and config.EVAL_SCENARIO_ID and hasattr(client, 'seed_style'):
+                import hashlib
+                seed_bytes = f'{run_id}:{scenario_id}'.encode()
+                style_seed = int.from_bytes(hashlib.sha256(seed_bytes).digest()[:8], 'big')
+                client.seed_style(style_seed)
+
+            fallback.reset_cycle()
+
+            _run_oneshot_demo(
+                robot=robot,
+                timestep=timestep,
+                vlm_api=vlm_api,
+                buffer=new_buffer,
+                client=client,
+                executor=executor,
+                fallback=fallback,
+                metrics_recorder=metrics_recorder,
+            )
+            spec['status'] = 'done'
+        except Exception as exc:
+            print(f'[batch] scenario {scenario_id} raised: {exc}')
+            spec['status'] = 'error'
+            spec['error'] = str(exc)
+        finally:
+            if new_buffer is not None:
+                new_buffer.stop()
+            vlm_api.set_metrics_recorder(None)
+            executor.set_metrics_recorder(None)
+
+        _write_playlist()
+
+        if i < len(scenarios) - 1:
+            hold_s = config.BATCH_INTER_SCENARIO_HOLD
+            _hold_simulation(robot, timestep, vlm_api, hold_s, f'inter-scenario pause before {scenarios[i + 1].get("id", "next")}')
+            _reset_robot_to_neutral(robot, timestep, vlm_api)
+
+    print(f'\n[batch] all {len(scenarios)} scenarios complete')
+    playlist['batch_status'] = 'done'
+    _write_playlist()
+
+
 def _request_simulation_quit(robot: Supervisor, status: int = 0) -> None:
     try:
         print(f'[sim] requesting Webots quit with status={status}')
@@ -1446,6 +1596,27 @@ def main():
                 buffer.stop()
             if config.ONE_SHOT_EXIT_AFTER_EXECUTE:
                 _request_simulation_quit(robot, 0)
+        return
+
+    if config.RUN_MODE == 'batch':
+        print('[init] run mode: batch (persistent Webots, sequential scenarios)')
+        if not config.BATCH_PLAYLIST_FILE:
+            print('[batch] ERROR: BATCH_PLAYLIST_FILE not set; cannot run batch mode')
+            _request_simulation_quit(robot, 1)
+            return
+        try:
+            _run_batch_demo(
+                robot=robot,
+                timestep=timestep,
+                vlm_api=vlm_api,
+                executor=executor,
+                fallback=fallback,
+                client=client,
+            )
+        finally:
+            if buffer is not None:
+                buffer.stop()
+            _request_simulation_quit(robot, 0)
         return
 
     # 7. State-aware trigger + idle animator
