@@ -75,11 +75,11 @@ class IdleAnimator:
             'HeadYaw':        lambda t: 0.20 * math.sin(0.60 * t),
             # Subtle head nod in counter-phase with the chest (head sinks
             # slightly as chest rises).
-            'HeadPitch':      lambda t: 0.06 * math.sin(0.80 * t + math.pi),
+            'HeadPitch':      lambda t: 0.06 * math.sin(1.20 * t + math.pi),
             # Shoulder breathing — visible chest rise/fall, L/R opposite
             # phase gives a natural mild sway.
-            'LShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(0.80 * t),
-            'RShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(0.80 * t + math.pi),
+            'LShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(1.20 * t),
+            'RShoulderPitch': lambda t: 1.50 + 0.08 * math.sin(1.20 * t + math.pi),
             # Step 6 Part D: bilateral knee bounce, paired in phase
             # (symmetric squat). Amplitude ±0.12 rad (~7°) → hip rises and
             # falls by ~14 mm, clearly visible from a front view. Center
@@ -92,10 +92,10 @@ class IdleAnimator:
             # and knee bounce read as one coherent breathing motion. If
             # the robot ever rocks or loses balance, drop the frequency
             # back to 0.40 (period ~16 s) or comment out these four lines.
-            'LKneePitch':  lambda t: 0.10 + 0.12 * math.sin(0.80 * t),
-            'RKneePitch':  lambda t: 0.10 + 0.12 * math.sin(0.80 * t),
-            'LAnklePitch': lambda t: -0.05 - 0.06 * math.sin(0.80 * t),
-            'RAnklePitch': lambda t: -0.05 - 0.06 * math.sin(0.80 * t),
+            'LKneePitch':  lambda t: 0.10 + 0.12 * math.sin(1.20 * t),
+            'RKneePitch':  lambda t: 0.10 + 0.12 * math.sin(1.20 * t),
+            'LAnklePitch': lambda t: -0.05 - 0.06 * math.sin(1.20 * t),
+            'RAnklePitch': lambda t: -0.05 - 0.06 * math.sin(1.20 * t),
         }
         self._overlay_joints: Set[str] = set(self._formulas.keys())
 
