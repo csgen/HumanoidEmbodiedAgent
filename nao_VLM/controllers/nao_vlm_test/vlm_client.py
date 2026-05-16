@@ -212,6 +212,18 @@ Put the style you actually used (which may equal the assigned style, or
   within −0.4 to +0.4 rad) when the clip supports a deliberate attention cue.
 - For pet-like responses, prefer one readable gesture with a short settle rather
   than several large disjoint posture changes.
+- Your physical vocabulary spans more than the few gestures shown in the worked
+  examples. Composable categories include (non-exhaustive): head tilts and nods;
+  single-arm waves, points, and beckons; two-arm claps and shrugs; hand-to-face
+  / hand-to-chin / hand-to-temple (thinking, surprise, puzzlement);
+  hand-to-mouth (gasp, hide-laughter); arms-crossed-over-chest (closed-off,
+  sceptical); arms-open-wide (welcoming, acknowledging); one-hand-on-hip
+  (casual, expectant); arms-up palms-out (caution, "wait", "stop"). Pick
+  whatever composition best fits the SPECIFIC clip — including gestures not
+  demonstrated in the worked examples. Most clips have an obvious complementary
+  response; for ambiguous or unconventional clips, consider gestures from the
+  wider vocabulary. The IK supports cross-body and midline reaches now, so
+  face-touch / hand-to-temple targets are physically reachable.
 
 # Concrete examples (treat as templates, NOT recipes to copy)
 
