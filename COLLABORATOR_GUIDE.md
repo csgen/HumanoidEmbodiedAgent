@@ -8,7 +8,9 @@ VLM controller. The important entry points are `nao_VLM/controllers/nao_vlm_test
 for runtime control, `evaluation/` for benchmark/metrics/judge code, and
 `scripts/` for demos and recording. Paths are now repo-relative by default; set
 `REPO_DIR`, `WEBOTS_BIN`, or `PYTHON_BIN` only when your machine needs an
-override.
+override. `runtime.ini.example` is the committed template; each teammate keeps
+their own local `runtime.ini`. Docker/HPC are not part of the current branch
+scope unless the team explicitly reopens them.
 
 ## 这项目做什么
 
@@ -18,9 +20,9 @@ override.
 
 ## 当前分支
 
-- 开发分支：`br_dev_setup_darian`
+- 推荐继续分支：`phase5-canonical-eval`
 - 主分支：`main`
-- 当前阶段：Phase 5 评测框架进行中
+- 当前阶段：Phase 5 评测与 canonical 8 视频补齐
 
 ## 项目结构
 
@@ -37,8 +39,9 @@ override.
 
 1. 创建环境：`conda env create -f environment.yml`
 2. 激活环境：`conda activate humanoid_robot_vlm_darian`
-3. 确认 `.env`、`nao_VLM/controllers/nao_vlm_test/runtime.ini` 已指向正确 Python
-4. 确认 Webots 可执行文件可通过 `webots` 找到，或设置 `WEBOTS_BIN=/path/to/webots`
+3. 先复制 `nao_VLM/controllers/nao_vlm_test/runtime.ini.example` 为本机 `runtime.ini`
+4. 确认 `.env`、`nao_VLM/controllers/nao_vlm_test/runtime.ini` 已指向正确 Python
+5. 确认 Webots 可执行文件可通过 `webots` 找到，或设置 `WEBOTS_BIN=/path/to/webots`
 
 ## 常用入口
 
@@ -46,11 +49,13 @@ override.
 - 预计算后录制：`bash scripts/record_precomputed_side_by_side_demo.sh <输入视频> <输出 mp4>`
 - 仅启动演示窗口：`bash scripts/launch_side_by_side_demo.sh <输入视频>`
 - 录摄像头样例：`python3 scripts/record_webcam.py`
+- 按 canonical 文件名录制：`python3 scripts/record_webcam.py --output-path videos/scenario_01_wave.mp4`
 - 批量生成对照录屏：`bash scripts/batch_record_side_by_side_demos.sh`
 - 直播摄像头 demo：`WEBCAM_SOURCE=0 bash scripts/run_live_camera_demo.sh`
 - Phase 5 CaP 评测：`python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method cap`
 - Phase 5 baseline：`python -m evaluation.run_benchmark --scenario-set pilot --rounds 1 --method rule_baseline`
 - Judge 报告：`python -m evaluation.judge artifacts/eval/*.json --output artifacts/eval/report.md`
+- Benchmark 汇总：`python -m evaluation.summarize_results artifacts/eval/<exact_file>.json --output artifacts/eval/<name>_summary.md`
 
 ## 路径与环境变量
 
@@ -62,6 +67,14 @@ override.
 - `WEBCAM_SOURCE=0` 本机 Linux 摄像头
 - `WEBCAM_SOURCE=http://127.0.0.1:5000/video_feed` SSH tunnel 后的远程摄像头
 
+## Canonical 录制规范
+
+- 固定机位
+- 每段 4-8 秒
+- 动作前后各保留约 1 秒静止
+- `walk_away` 与 `crouch` 需要清晰全身构图
+- 尽量使用稳定光线与干净背景
+
 ## 录屏产物
 
 - 只推送：`artifacts/screen_recordings_matched/`
@@ -70,15 +83,17 @@ override.
 ## 协作约定
 
 - 先 `git pull origin main` 再改代码
-- 代码改动留在 `br_dev_setup_darian`
+- 优先从 `main` 新开分支，例如 `phase5-canonical-eval`
+- `runtime.ini` 只保留本机，不提交
 - 合并到 `main` 前先确认录屏产物和文档都已更新
 - 不要把 `artifacts/screen_recordings/`、`artifacts/oneshot/` 之类的临时调试结果一起推上去
 - 录屏只保留 `artifacts/screen_recordings_matched/`
+- 当前分支不重新引入 Docker/HPC 打包
 
 ## 协作流程
 
 1. `git pull origin main`
-2. 在 `br_dev_setup_darian` 上改代码
+2. 从 `main` 切出自己的工作分支
 3. 只提交必要代码、文档和 `artifacts/screen_recordings_matched/`
-4. `git push origin br_dev_setup_darian`
-5. 需要合并到主分支时，再把 `br_dev_setup_darian` 合入 `main`
+4. `git push origin <your-branch>`
+5. 需要合并到主分支时，再把该工作分支合入 `main`

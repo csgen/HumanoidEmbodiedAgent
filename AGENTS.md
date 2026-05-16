@@ -2,6 +2,14 @@
 
 This file is the root-level handoff for future agents and collaborators. The short version: this project is now a Webots + Python + Pinocchio + VLM system, and the active milestone is Phase 5 evaluation, not a ROS/Gazebo rebuild.
 
+## Current Branch Scope
+
+- Treat `main` as the source of truth.
+- Treat `phase5-foundation` as an archive branch; do not cherry-pick it wholesale.
+- `runtime.ini.example` is the shared template; each teammate keeps a local untracked `runtime.ini`.
+- Docker/HPC are out of scope for the current branch unless the team explicitly reopens that decision.
+- Evaluation-first is the active milestone; live camera remains a secondary demo path.
+
 ## Current Project Shape
 
 - Simulator: Webots, with the main world at `nao_VLM/worlds/nao_VLM.wbt`.
@@ -56,6 +64,7 @@ What Phase 5 adds:
 - Offline metrics: execution success, safety adherence, fallback count, jerk, and CoM excursion proxy.
 - A fair rule-based baseline that uses the same video input, sandbox, and execution path but replaces generative code with `intent label -> fixed code`.
 - Optional VLM-as-Judge report generation.
+- Aggregate summary generation for report-ready benchmark readouts.
 - Portable script paths and Sam's local Webots/macOS env.
 
 Why this is academically stronger than a plain API integration:
@@ -200,6 +209,7 @@ The evaluation layer lives in `evaluation/`:
 - `evaluation/run_benchmark.py`: launches Webots once per scenario/round/method and aggregates JSON/CSV outputs.
 - `evaluation/rule_baseline.py`: fixed-code baseline that uses the same sandbox and execution path as CaP. It can fall back to scenario-id heuristics when no OpenAI key is available.
 - `evaluation/judge.py`: optional VLM-as-judge report with cached judgments.
+- `evaluation/summarize_results.py`: generates report-ready markdown summaries from aggregate benchmark JSON files.
 
 The controller metrics hook lives at:
 
@@ -275,6 +285,7 @@ Start with pure local checks. These do not require Webots, ROS, or an API key:
 bash -n run_example_video_demo.sh scripts/*.sh
 python3 -m evaluation.run_benchmark --help
 python3 -m evaluation.judge --help
+python3 -m evaluation.summarize_results --help
 ```
 
 Then verify Webots availability:
@@ -332,6 +343,12 @@ Generate a judge report after benchmark JSON files exist:
 python3 -m evaluation.judge artifacts/eval/*.json --output artifacts/eval/report.md
 ```
 
+Generate a report-ready summary after benchmark JSON files exist:
+
+```bash
+python3 -m evaluation.summarize_results artifacts/eval/<exact_file>.json --output artifacts/eval/<name>_summary.md
+```
+
 Expected success conditions:
 
 - Every benchmark run writes a valid `result.json`.
@@ -357,7 +374,21 @@ The canonical benchmark is the original proposal's 8 phone-recorded scenarios:
 7. Greeting/handshake.
 8. Idle standing.
 
-Those canonical files do not yet exist locally under `videos/scenario_*.mp4`. The repo currently has 10 existing pilot clips under `debug_video_samples/` such as waving, pointing, stop, thumbs-up, yes-nod, no-shake, clap, beckon, and shrug. "Run the pilot benchmark now" means use those existing clips immediately to test the harness and compare CaP vs baseline before spending time recording the final canonical 8.
+Those canonical files now exist locally under `videos/scenario_01_wave.mp4` through `videos/scenario_08_idle.mp4`. The repo also has 10 existing pilot clips under `debug_video_samples/` such as waving, pointing, stop, thumbs-up, yes-nod, no-shake, clap, beckon, and shrug. "Run the pilot benchmark now" means use those existing clips immediately to test the harness and compare CaP vs baseline before or alongside the final canonical 8.
+
+Canonical recording protocol:
+
+- fixed camera viewpoint
+- 4-8 seconds per clip
+- 1 second of stillness before and after the gesture
+- clear full-body framing for `walk_away` and `crouch`
+- neutral background and stable lighting when possible
+
+Helpful recording command:
+
+```bash
+python3 scripts/record_webcam.py --output-path videos/scenario_01_wave.mp4
+```
 
 Pilot commands:
 
@@ -466,6 +497,7 @@ As of 2026-05-10 on Sam's Mac:
 
 - Preserve teammate native Linux usage. Prefer env overrides (`WEBOTS_BIN`, `PYTHON_BIN`, `REPO_DIR`) over hardcoded machine paths.
 - Do not reintroduce Darian-specific paths such as `/home/darian/...`.
+- Keep the current branch scoped to benchmark/evaluation completion; do not reintroduce Docker/HPC packaging unless the team explicitly asks for it.
 - Keep Mandarin original text if it is useful, but add English summaries around it. Work in English by default.
 - Do not commit generated benchmark artifacts from `artifacts/eval/` or `artifacts/oneshot/` unless explicitly requested. The historical convention is to share only selected demo recordings under matched screen-recording paths.
 - Do not revert unrelated user or teammate changes in the worktree.
