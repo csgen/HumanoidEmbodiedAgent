@@ -213,6 +213,7 @@ The per-run `result.json` schema is documented in `evaluation/RESULT_SCHEMA.md`.
   cap-vs-baseline design, environment variables, testing.
 - **`COLLABORATOR_GUIDE.md`** — day-to-day collaborator runbook: demo scripts,
   recording conventions, and branch workflow.
+- Demo videos — folder `demo_videos`
 
 ## Helpful Links
 - [Webots official site](https://cyberbotics.com)
